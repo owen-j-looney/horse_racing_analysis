@@ -6,6 +6,7 @@ library(stringr)
 library(purrr)
 library(curl)
 library(glue)
+library(ggplot2)
 
 #getting list of 
 base_url <- "https://www.racingaustralia.horse/FreeFields/Calendar_Results.aspx"
@@ -90,11 +91,27 @@ for (n in 1:length(race_tables_non_abndn)){
   }
 }
 
-tst_race_tbl1 <- race_tables_non_abndn[[1]][[2]]
 
-test1 <- Filter(function(x) ncol(x) > 1,race_tables_non_abndn)
-  
+race_results_list <- flatten(race_tables_non_abndn)
 
-test2 <- lapply(race_tables_non_abndn, function(x) Filter(ncol(x)>2))
+filtered_race_results_list <- Filter(function(x) ncol(x) == 13,race_results_list)
 
+race_results_combined <- do.call("rbind", filtered_race_results_list) 
+
+race_results_combined <- race_results_combined %>%
+  select(-Colour,
+         -Penalty) %>%
+  mutate(odds = as.numeric(gsub(".*?([0-9.]+).*", "\\1",`Starting Price`)),
+         Date_format = as.Date(str_split(info, ",") %>% map_chr(., 1),
+                               format('%Y%b%d')),
+         State = str_split(info, ",") %>% map_chr(., 2),
+         Racecourse = str_split(info, ",") %>% map_chr(., 3),
+         Race = str_split(info, ",") %>% map_chr(., 4),
+         Day_of_week = format(Date_format, '%a')) %>%
+  na.omit() 
+
+saveRDS(race_results_combined, glue("C:/Users/owenl/Documents/Owen/R_git/Horse_racing_analysis/Race_results_last_month_{Sys.Date()}.rds"))
+############### Results saved as RDS on local drive to allow combination of race results over longer periods in future ##########
+##### End of script run to pull and clean race data into useable format
+#### more can be done like converting dates etc.
 
