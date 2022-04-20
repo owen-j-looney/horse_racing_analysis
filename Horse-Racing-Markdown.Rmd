@@ -1,0 +1,278 @@
+---
+title: "Horse Racing Analysis"
+author: "Owen Looney"
+date: "20/04/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(rvest)
+library(xml2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+library(curl)
+library(glue)
+library(ggplot2)
+library(caret)
+library(knitr)
+library(rgl)
+library(plotly)
+knitr::opts_chunk$set(echo = TRUE)
+knitr::knit_hooks$set(webgl = hook_webgl)
+```
+
+
+```{r loading libraries}
+library(rvest)
+library(xml2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+library(curl)
+library(glue)
+library(ggplot2)
+library(caret)
+library(knitr)
+library(rgl)
+library(plotly)
+```
+## R Markdown
+
+```{r data download and clean}
+
+#getting required urls
+base_url <- "https://www.racingaustralia.horse/FreeFields/Calendar_Results.aspx"
+
+state_list <- c("NSW",
+                "QLD",
+                "ACT",
+                "VIC",
+                "TAS",
+                "SA",
+                "WA",
+                "NT")
+
+#creating blank list so i can get a url for race results for each state
+state_list_url <- c()
+
+#generating urls for each states racing results over the last month
+for (i in 1:length(state_list)) {
+  state_list_url[[i]] <- paste0(base_url,"?State=", state_list[i])
+}
+
+#generating a list of urls to run through to get all race data for last month
+results <- function(url_list){
+  paste0("https://www.racingaustralia.horse",
+         read_html(url_list) %>%
+           html_nodes("a") %>%       
+           # find all links in the page
+           html_attr("href") %>%
+           unique() %>%
+           str_subset("/FreeFields/Results")
+  )
+}
+
+#getting list of all urls with race data and converting to one list
+race_results_urls <- map(state_list_url, results) %>%
+  flatten() 
+
+#separating out trial and race data
+trial_results_urls <- race_results_urls[grepl("Trial", race_results_urls)]
+
+racing_results_urls <- race_results_urls[!grepl("Trial", race_results_urls)]
+
+#creating function to extract all tables from each url 
+read_html_tbls <- function(url) {
+  url = url(url, 'rb')
+  html <- read_html(url) %>%
+    html_table()
+  
+  close(url)
+  return(html)
+}
+
+#creating blank list for race tables to be appended to
+race_tables <- c()
+
+#appending all race tables
+race_tables <- map(racing_results_urls,read_html_tbls)
+
+#creating blank list for trial tables to be appended to
+trial_tables <- c()
+
+#appending all race tables
+trial_tables <- map(trial_results_urls,read_html_tbls)
+
+#naming each group of tables with their date and location
+names(trial_tables) <- sub('.*Key=','',trial_results_urls)
+
+
+#naming each group of tables with their date and location
+names(race_tables) <- sub('.*Key=','',racing_results_urls)
+
+#removing abandoned races with no data
+race_tables_non_abndn <- Filter(function(x) length(x) > 1,race_tables)
+
+#removing abandoned races with no data
+trial_tables_non_abndn <- Filter(function(x) length(x) > 1,trial_tables)
+
+#filtering out tables that have non race results or race information
+#appending race info table as a character string to the relevant race so it can be used
+for (n in 1:length(race_tables_non_abndn)){
+  if (ncol(race_tables_non_abndn[[n]][[1]])==4){
+    race_tables_non_abndn[[n]] <- race_tables_non_abndn[[n]][-1]
+  } else {
+    NULL
+  }}
+
+  for (i in 1:length(race_tables_non_abndn[[n]])) {
+    if ((i %% 2)!=0){
+      NA
+      } else {
+        race_tables_non_abndn[[n]][[i]] <-race_tables_non_abndn[[n]][[i]] %>% 
+          dplyr::mutate(character= as.character(race_tables_non_abndn[[n]][[i-1]]),
+                 race_info = as.character(names(race_tables_non_abndn[[n]][[i-1]])),
+                 info = glue("{names(race_tables_non_abndn)[[n]]}"))
+      }
+  }
+
+
+
+#filtering out tables that have non trial results or race information
+#appending race info table as a character string to the relevant race so it can be used
+for (n in 1:length(trial_tables_non_abndn)){
+  if (ncol(trial_tables_non_abndn[[n]][[1]])==4){
+    trial_tables_non_abndn[[n]] <- trial_tables_non_abndn[[n]][-1]
+  } else {
+    NULL
+  }
+  for (i in 1:length(trial_tables_non_abndn[[n]])) {
+    if (ncol(trial_tables_non_abndn[[n]][[i]])<2){
+      NA
+    } else {
+      trial_tables_non_abndn[[n]][[i]] <- trial_tables_non_abndn[[n]][[i]] %>%
+        mutate(character = as.character(trial_tables_non_abndn[[n]][[i-1]]),
+               race_info = as.character(names(trial_tables_non_abndn[[n]][[i-1]])),
+               info = glue("{names(trial_tables_non_abndn)[[n]]}"))
+    }
+  }
+}
+
+#flattening out both race and trial results
+race_results_list <- flatten(race_tables_non_abndn)
+
+trial_results_list <- flatten(trial_tables_non_abndn)
+
+#keeping only tables that have anough columns to contain actual race data, not simply information regarding each race
+filtered_race_results_list <- Filter(function(x) ncol(x) == 14,race_results_list)
+
+filtered_trial_results_list <- Filter(function(x) ncol(x) == 14,trial_results_list)
+
+#converting each list into a single df
+race_results_combined <- do.call("rbind", filtered_race_results_list) 
+
+trial_results_combined <- do.call("rbind", filtered_trial_results_list) 
+
+#cleaning some data and extracting some information into columns for both race and trial data
+race_results_combined <- race_results_combined %>%
+  select(-Colour,
+         -Penalty) %>%
+  mutate(Finish = as.numeric(Finish),
+         odds = as.numeric(gsub(".*?([0-9.]+).*", "\\1",`Starting Price`)),
+         Weight = as.numeric(gsub("kg.*","", Weight)),
+         Date_format = as.Date(str_split(info, ",") %>% map_chr(., 1),
+                               format('%Y%b%d')),
+         State = as.factor(str_split(info, ",") %>% map_chr(., 2)),
+         Racecourse = as.factor(str_split(info, ",") %>% map_chr(., 3)),
+         Race = as.factor(str_extract(race_info, "^Race \\d+")),
+         Day_of_week = as.factor(format(Date_format, '%a')),
+         distance = str_extract_all(race_info,"\\(\\d\\d\\d\\d METRES\\)"),
+         track_condition = as.factor(as.character(str_extract_all(race_results_combined$character,"Track Condition: .* \\d+ T"))),
+         distance = as.numeric(str_replace_all(distance, c("\\(" = "", "METRES\\)" = ""))),
+         winning_time = gsub("Time: ","",str_extract_all(character,"Time: \\d+:\\d+.\\d+ "))
+         ) %>%
+  na.omit() 
+
+#saveRDS(race_results_combined, glue("C:/Users/owenl/Documents/Owen/R_git/Horse_racing_analysis/Race_results_last_month_{Sys.Date()}.rds"))
+
+
+
+trial_results_combined <- trial_results_combined %>%
+  select(-Colour,
+         -Penalty) %>%
+  mutate(Finish = as.numeric(Finish),
+         odds = as.numeric(gsub(".*?([0-9.]+).*", "\\1",`Starting Price`)),
+         Weight = as.numeric(gsub("kg.*","", Weight)),
+         Date_format = as.Date(str_split(info, ",") %>% map_chr(., 1),
+                               format('%Y%b%d')),
+         State = as.factor(str_split(info, ",") %>% map_chr(., 2)),
+         Racecourse = as.factor(str_split(info, ",") %>% map_chr(., 3)),
+         Race = as.factor(str_extract(race_info, "^Race \\d+")),
+         Day_of_week = as.factor(format(Date_format, '%a')),
+         distance = str_extract_all(race_info,"\\(\\d+ METRES\\)"),
+         track_condition = as.factor(as.character(str_extract_all(character,"Track Condition: .* \\d+ T"))),
+         distance = as.numeric(str_replace_all(distance, c("\\(" = "", "METRES\\)" = ""))),
+         winning_time = gsub("Time: ","",str_extract_all(character,"Time: \\d+:\\d+.\\d+ "))
+  )
+#saveRDS(trial_results_combined, glue("C:/Users/owenl/Documents/Owen/R_git/Horse_racing_analysis/Trial_results_last_month_{Sys.Date()}.rds"))
+
+#both trial and race data contain the same columns, so an analysis can be run on both combined if required
+
+all_race_data <- rbind(race_results_combined, trial_results_combined)
+
+kable(head(all_race_data))
+
+```
+
+
+```{r adding times to all horses}
+# creating time function to approximate a finish time for all horses, not just winning horses
+time_function <- function(dataset){
+dataset$winning_time_sec<- as.numeric(gsub(":","",str_extract(dataset$winning_time,":\\d+.\\d+")))
+
+dataset$winning_time_min <- as.numeric(str_extract(dataset$winning_time,"\\d+"))*60
+dataset$winning_time_total <- dataset$winning_time_min+dataset$winning_time_sec
+dataset$Margin <- gsub("L","",dataset$Margin) 
+dataset$Margin_Metres <- as.numeric(dataset$Margin)*2.5
+dataset$winner_MperSec <- dataset$distance/dataset$winning_time_total
+
+dataset$time <- dataset$winning_time_total+
+  ifelse(is.na(dataset$Margin_Metres/dataset$winner_MperSec),
+         0,
+         dataset$Margin_Metres/dataset$winner_MperSec)
+return(dataset)
+}
+
+all_race_data <- time_function(all_race_data)
+
+kable(head(all_race_data))
+
+```
+
+
+```{r basic plot}
+all_race_data_clean <- all_race_data %>%
+  select(-winning_time,
+         -winning_time_sec,
+         -winning_time_min,
+         -winning_time_total,
+         -winner_MperSec) %>%
+  mutate(RaceID = paste(info,",",Race),
+         ID = paste(info,",",Race,"Finish-", Finish),
+         Margin_Metres = ifelse(is.na(Margin_Metres)==T, 0, Margin_Metres)) %>%
+  filter(time >0,
+         is.na(Finish)!=T) %>%
+  arrange(RaceID, Finish) %>%
+  group_by(Date_format)
+
+ggplot(all_race_data_clean) +
+  geom_point(aes(x=distance,y=time, colour = Finish))
+
+plot3d(x = all_race_data_clean$distance,y= all_race_data_clean$Weight, z =all_race_data_clean$Bar., col = all_race_data_clean$Finish) 
+
+plot_ly(data = all_race_data_clean, x= ~distance, y=~time, z=~Weight, color = ~Finish)
+
+```
