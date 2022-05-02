@@ -19,6 +19,7 @@ library(ggplot2)
 library(caret)
 library(knitr)
 library(reactable)
+library(lubridate)
 
 knitr::opts_chunk$set(
 	echo = TRUE,
@@ -437,16 +438,80 @@ It has occurred to me that since favourites win approximately 40% of the time, i
 
 For this to work, the user would need a decent pool of available cash on hand, to sustain increasing bets until a winner pays out and returns all previous bets plus desired winnings. The other most important factor, would be that the better quits after winning their desired amount for that day. This essentially means that if the first favourite wins, the bettor is finished after one race for that day. If it takes 7 races for a favourite to win, the bettor will wager on all 7 races with increasing amounts until a winner emerges. 
 
+
+
 ```{r making money }
-
-all_race_data_clean %>% group_by(track_condition) %>% summarise(fav_winners = sum(fav_winner), count = n(),fav_win_perc = (fav_winners/count)*100)
-
+#attempting to create a betting system on favourites where bets grow larger to recoup losses until a winner is picked providing the desired profit
 
 
+daily_profit_function <- function(race_data, desired_profit_daily = 200){
+fav_betting_system_df <- race_data %>%
+  #only need favourites
+  filter(favourite == 1) %>%
+  #arranging by time to align with real life and multiple tracks on same day, and barrier to remove any horses where there are multiple favourites so only a single fav is chosen for each race
+  arrange(Datetime, Bar.) %>%
+  #selecting single fav for each race
+  distinct(Datetime, .keep_all =T) %>%
+  #calculating required bet wo win $200 of that race
+  mutate(bet = NA,
+         new_bet = NA,
+         total_outlay = NA) 
 
+#calculating the bet amount for each individual race, and the total outlay, for races after an initial race has failed. so all bet amount would be taken off the total_outlay once this is complete
+for (i in 1:nrow(fav_betting_system_df)){
+  if (i==1){
+    fav_betting_system_df$bet[[i]] <- 1
+    fav_betting_system_df$new_bet[[i]] <- desired_profit_daily/(fav_betting_system_df$odds[[i]]-1)
+    fav_betting_system_df$total_outlay[[i]] <- desired_profit_daily/(fav_betting_system_df$odds[[i]]-1)
+  } else if(fav_betting_system_df$Date_format[[i]] != fav_betting_system_df$Date_format[[i-1]]) {
+    fav_betting_system_df$bet[[i]] <- 1
+    fav_betting_system_df$new_bet[[i]] <- desired_profit_daily/(fav_betting_system_df$odds[[i]]-1)
+    fav_betting_system_df$total_outlay[[i]] <- desired_profit_daily/(fav_betting_system_df$odds[[i]]-1)
+  } else {
+    fav_betting_system_df$bet[[i]] <- ifelse(fav_betting_system_df$bet[[i-1]]==0,
+                                             0,
+                                             ifelse(fav_betting_system_df$winner[[i-1]]==1,
+                                                    0,
+                                                    1))
+    fav_betting_system_df$new_bet[[i]] <- ifelse(fav_betting_system_df$bet[[i]]==1,(fav_betting_system_df$total_outlay[[i-1]]+desired_profit_daily)/(fav_betting_system_df$odds[[i]]-1),0)
+    fav_betting_system_df$total_outlay[[i]] <- ifelse(fav_betting_system_df$bet[[i]]==1, (fav_betting_system_df$total_outlay[[i-1]]+fav_betting_system_df$new_bet[[i]]),0)
+  }
+}
 
+return(fav_betting_system_df)
+}
 
+graph_daily_bets <- function(profit_data){
+#quick plot of number of bets per day to get a winner
+ggplot(profit_data %>% group_by(Date_format) %>%
+          summarise(numbets_day = sum(bet))) +
+   geom_line(aes(x=Date_format, y = numbets_day))
 
+}
+
+graph_daily_profits <- function(profit_data){
+#quick plot of maximum amount required for any single day of betting to get a winner over the previous month
+ggplot(profit_data %>% group_by(Date_format) %>%
+         summarise(maxbet = max(total_outlay))) +
+   geom_line(aes(x=Date_format, y = maxbet))
+}
+
+profit_system_df_function <- function(profit_data){
+fav_betting_system_df_bets <- profit_data %>%
+  #filtering for only races we bet on now
+  filter(bet ==1) %>%
+  mutate(profits = ifelse(winner ==1,(new_bet*odds)-new_bet,-new_bet),
+         roll_profits = cumsum(profits))
+return(fav_betting_system_df_bets)
+}
+
+profit_50_daily <- daily_profit_function(all_race_data_clean, 50)
+graph_daily_profits(profit_50_daily)
+graph_daily_bets(profit_50_daily)
+cat("below is a table showing all races bet on during the month, and the profit of each race")
+reactable(profit_system_df_function(profit_50_daily) %>% select(-character,
+                                                                -info,
+                                                                -race_info))
 
 ```
 
