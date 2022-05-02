@@ -161,7 +161,7 @@ race_results_combined <- race_results_combined %>%
          ) %>%
   na.omit() 
 
-#saveRDS(race_results_combined, glue("C:/Users/owenl/Documents/Owen/R_git/Horse_racing_analysis/Race_results_last_month_{Sys.Date()}.rds"))
+saveRDS(race_results_combined, glue("C:/Users/owenl/Documents/Owen/R_git/Horse_racing_analysis/Race_results_last_month_{Sys.Date()}.rds"))
 
 
 
@@ -182,7 +182,7 @@ trial_results_combined <- trial_results_combined %>%
          distance = as.numeric(str_replace_all(distance, c("\\(" = "", "METRES\\)" = ""))),
          winning_time = gsub("Time: ","",str_extract_all(character,"Time: \\d+:\\d+.\\d+ "))
   )
-#saveRDS(trial_results_combined, glue("C:/Users/owenl/Documents/Owen/R_git/Horse_racing_analysis/Trial_results_last_month_{Sys.Date()}.rds"))
+saveRDS(trial_results_combined, glue("C:/Users/owenl/Documents/Owen/R_git/Horse_racing_analysis/Trial_results_last_month_{Sys.Date()}.rds"))
 
 #both trial and race data contain the same columns, so an analysis can be run on both combined if required
 
@@ -368,9 +368,69 @@ fav_bet <- betting_function(fav_horse, bet = 100)
 ggplot(fav_bet)+
   geom_line(aes(x=Date_format, y = rolling_return))
 
+#######
 
+#creating a betting df with required odds to win $100 from a single race
+odds <- round(rep(seq(1.01,301,0.01),2),2)
+winner <- rep(0:1,length(odds)/2)
+bet_df <- data.frame(odds) %>%
+  arrange(odds) %>%
+  #cbind(winner) %>%
+  mutate(bet_amount = round(-200/(1-odds),2),
+         winnings = (odds*bet_amount)-bet_amount) %>%
+  distinct()
 
+all_race_data_clean <- as.data.frame(all_race_data_clean)%>%
+  mutate(winner = as.integer(ifelse(Finish==1,1,0))) 
+t1 <- left_join(all_race_data_clean, 
+                bet_df, by= c("odds"))
 
+#applying a bet to the favourite on each day until i get a winner then stopping
+t2 <- t1 %>% 
+  group_by(Date_format, RaceID) %>%
+  arrange(Date_format, RaceID,odds) %>%
+  mutate(outcome = ifelse(Finish ==1,winnings,-bet_amount)) %>%
+  filter(odds ==min(odds),
+         is.na(odds)!=T,
+         track_condition != "Track Condition: Heavy 8 T",
+         track_condition != "Track Condition: Heavy 9 T",
+         track_condition != "Track Condition: Heavy 10 T",
+         Day_of_week != "Sat") %>%
+  ungroup() %>%
+  mutate(init_bet_indicator = ifelse(lag(Date_format)!= Date_format,1,0),
+         init_bet_indicator = ifelse(is.na(init_bet_indicator),1,init_bet_indicator),
+         init_bet_outcome = init_bet_indicator*outcome) %>%
+  group_by(Date_format) %>%
+  mutate(daily_outcome = cumsum(init_bet_outcome)) %>%
+  group_by(Date_format, RaceID) 
+
+for (i in 1:nrow(t2)){
+  if(i==1){
+    t2$new_bet[i] <- 100
+  } else if (t2$Date_format[i-1]== t2$Date_format[i]) {
+  t2$new_bet[i] <- ifelse(t2$winner[i-1]>0|t2$new_bet[i-1]==0,0,((-100-t2$new_bet[i-1])/(1-t2$odds[i])))
+  } else {
+    t2$new_bet[i] <- t2$bet_amount[i]
+  }
+  t2$new_bet_lag <- lag(t2$new_bet,1)
+}
+  
+
+for (i in 1:nrow(t2)){
+  if(i==1){
+    t2$new_bet[i] <- t2$bet_amount[i]
+  } else if (t2$Date_format[i-1]== t2$Date_format[i]) {
+    t2$new_bet[i] <- ifelse(t2$winner[i-1]>0|t2$new_bet[i-1]==0,0,((-200-t2$new_bet[i-1]-t2$new_bet_lag[i-1])/(1-t2$odds[i])))
+  } else {
+    t2$new_bet[i] <- t2$bet_amount[i]
+  }
+  t2$new_bet_lag <- lag(t2$new_bet,1)
+  t2$win_loss <- ifelse(t2$winner==1,(t2$new_bet*t2$odds)-t2$new_bet,-t2$new_bet)
+  t2$cum_sum <- cumsum(t2$win_loss)
+}
+
+ggplot(data = t2) +
+  geom_point(aes(x=Date_format, y=cum_sum))
 
 #######
 
