@@ -17,6 +17,8 @@ library(curl)
 library(glue)
 library(ggplot2)
 library(caret)
+library(nnet)
+library(NeuralNetTools)
 library(knitr)
 library(reactable)
 library(lubridate)
@@ -217,9 +219,10 @@ trial_results_combined <- trial_results_combined %>%
 
 #both trial and race data contain the same columns, so an analysis can be run on both combined if required
 
+#combining all trial and race data into one dataset
 all_race_data <- rbind(race_results_combined, trial_results_combined)
-  
 
+#plotting head of data to enable reader to see an example of the data
 reactable(head(all_race_data,1))
 
 ```
@@ -387,7 +390,7 @@ test_horse_data_rf_bet <- test_horse_data %>%
          roll_total = cumsum(profit))
 
 
-kable(test_horse_data_rf_bet %>%
+reactable(test_horse_data_rf_bet %>%
         select(Horse,
                RaceID,
                Bar.,
@@ -419,11 +422,13 @@ nnet_model <- train(nn_train_df,
 ```
 
 ```{r nnet part2}
-#showing summary of neuralnet
-nnet_model
-
 #Predictions on the test set
 nnet_predictions_test <-ifelse(predict(nnet_model, test_horse_data)>=0.5,1,0)
+
+#plotting neuralnet to show
+plotnet(nnet_model$finalModel, y_names = "IncomeLevel")
+title("Graphical Representation of our Neural Network")
+
 
 # Confusion matrix on test set
 table(test_horse_data$winner, nnet_predictions_test)
@@ -485,7 +490,10 @@ graph_daily_bets <- function(profit_data){
 #quick plot of number of bets per day to get a winner
 ggplot(profit_data %>% group_by(Date_format) %>%
           summarise(numbets_day = sum(bet))) +
-   geom_line(aes(x=Date_format, y = numbets_day))
+   geom_line(aes(x=Date_format, y = numbets_day))+
+    labs(title = "plot of number of bets per day to get a winner",
+         x = "Date",
+         y = "Number of daily bets required until a favourite wins")
 
 }
 
@@ -493,7 +501,22 @@ graph_daily_profits <- function(profit_data){
 #quick plot of maximum amount required for any single day of betting to get a winner over the previous month
 ggplot(profit_data %>% group_by(Date_format) %>%
          summarise(maxbet = max(total_outlay))) +
-   geom_line(aes(x=Date_format, y = maxbet))
+   geom_line(aes(x=Date_format, y = maxbet))+
+    labs(title = "plot of maximum amount required for any single day of betting to get a winner",
+         x = "Date",
+         y = "Total money required to 'double down'")
+}
+
+graph_total_profits <- function(profit_data){
+  ggplot(profit_data %>% 
+           #filtering for only races we bet on now
+            filter(bet ==1) %>%
+            mutate(profits = ifelse(winner ==1,(new_bet*odds)-new_bet,-new_bet),
+            roll_profits = cumsum(profits))) +
+    geom_line(aes(x = Datetime, y = roll_profits))+
+    labs(title = "accumulative profits through time",
+         x = "Time",
+         y = "Accumulative profits")
 }
 
 profit_system_df_function <- function(profit_data){
@@ -508,6 +531,7 @@ return(fav_betting_system_df_bets)
 profit_50_daily <- daily_profit_function(all_race_data_clean, 50)
 graph_daily_profits(profit_50_daily)
 graph_daily_bets(profit_50_daily)
+graph_total_profits(profit_50_daily)
 cat("below is a table showing all races bet on during the month, and the profit of each race")
 reactable(profit_system_df_function(profit_50_daily) %>% select(-character,
                                                                 -info,
