@@ -25,9 +25,10 @@ library(lubridate)
 
 knitr::opts_chunk$set(
 	echo = TRUE,
-	#message = FALSE,
+	message = FALSE,
 	warning = FALSE,
-	comment = FALSE
+	comment = FALSE,
+	opts.label="kill_prefix"
 )
 ```
 
@@ -39,7 +40,7 @@ This analysis devles into horse racing data, and attempting to identify ways to 
 The horse racing data was sourced from the Racing Australia [website](https://www.racingaustralia.horse/Home.aspx) under the racing results tab. The Racing Australia website only stores data for the previous month of races, however it does include trial runs. The race data includes information such as the barrier, weight the horse is carrying, the trainer, the jockey, the date, the track, among many other attributes. The position of the horse at the end of the race, and the length the horse lost by (in lengths) are also included in the data, however lengths is an arbitrary unit of distance, so this was converted to metres by assuming a single horse length was 2.5 metres. 
 The horse racing data initially looks like this:
 
-```{r data download and clean, echo=FALSE}
+```{r data download and clean, echo=TRUE}
 
 #getting required urls
 base_url <- "https://www.racingaustralia.horse/FreeFields/Calendar_Results.aspx"
@@ -120,15 +121,18 @@ trial_tables_non_abndn <- Filter(function(x) length(x) > 1,trial_tables)
 #filtering out tables that have non race results or race information
 #appending race info table as a character string to the relevant race so it can be used
 for (n in 1:length(race_tables_non_abndn)){
+  #some days the first table is a 4 column table which contains no useful information and these are to be filtered out (on days like public holidays etc. where there are certain specialties applied by the looks of it)
   if (ncol(race_tables_non_abndn[[n]][[1]])==4){
     race_tables_non_abndn[[n]] <- race_tables_non_abndn[[n]][-1]
   } else {
     NULL
   }
   for (i in 1:length(race_tables_non_abndn[[n]])) {
+    #keeping tables that are 11 columns wide - containing race data, all others containing 1 col are race info or simply abandoned races that are not useful.
     if (ncol(race_tables_non_abndn[[n]][[i]])!=11){
       NA
       } else {
+        #taking useful data from previous tables and converting it into columns in current table
         race_tables_non_abndn[[n]][[i]] <-race_tables_non_abndn[[n]][[i]] %>% 
           mutate(character= as.character(race_tables_non_abndn[[n]][[i-1]]),
                  race_info = as.character(names(race_tables_non_abndn[[n]][[i-1]])),
@@ -141,6 +145,7 @@ for (n in 1:length(race_tables_non_abndn)){
 
 #filtering out tables that have non trial results or race information
 #appending race info table as a character string to the relevant race so it can be used
+#running same query as above - did not create a function due to data extraction occuring once and this applying to 2 data sets - copy and paste with changes is just as time efficient as making an iterable function
 for (n in 1:length(trial_tables_non_abndn)){
   if (ncol(trial_tables_non_abndn[[n]][[1]])==4){
     trial_tables_non_abndn[[n]] <- trial_tables_non_abndn[[n]][-1]
@@ -176,28 +181,35 @@ trial_results_combined <- do.call("rbind", filtered_trial_results_list)
 
 #cleaning some data and extracting some information into columns for both race and trial data
 race_results_combined <- race_results_combined %>%
+  #removing useless columns
   select(-Colour,
          -Penalty) %>%
   mutate(Finish = as.numeric(Finish),
+         #converting odds & weight to a number
          odds = as.numeric(gsub(".*?([0-9.]+).*", "\\1",`Starting Price`)),
          Weight = as.numeric(gsub("kg.*","", Weight)),
+         #converting Date to an actual date in required format
          Date_format = as.Date(str_split(info, ",") %>% map_chr(., 1),
                                format('%Y%b%d')),
+         #splitting the info column into useful data such as state & racecourse
          State = as.factor(str_split(info, ",") %>% map_chr(., 2)),
          Racecourse = as.factor(str_split(info, ",") %>% map_chr(., 3)),
+         #getting race number
          Race = as.factor(str_extract(race_info, "^Race \\d+")),
+         #converting date to a day of the week - purely as Wednesdays and Saturdays are bigger meets
          Day_of_week = as.factor(format(Date_format, '%a')),
+         #getting race/trial distance
          distance = str_extract_all(race_info,"\\(\\d\\d\\d\\d METRES\\)"),
+         #getting track condition which is critically important to clean properly
          track_condition = as.factor(as.character(str_extract_all(race_results_combined$character,"Track Condition: .* \\d+ T"))),
+         #converting distance to number
          distance = as.numeric(str_replace_all(distance, c("\\(" = "", "METRES\\)" = ""))),
+         #applying the winning time from each race to all horses in that race so an approx time for each hores could be calculated in the future
          winning_time = gsub("Time: ","",str_extract_all(character,"Time: \\d+:\\d+.\\d+ "))
          ) %>%
   na.omit() 
 
-#saveRDS(race_results_combined, glue("C:/Users/owenl/Documents/Owen/R_git/Horse_racing_analysis/Race_results_last_month_{Sys.Date()}.rds"))
-
-
-
+#applying the same logic from above to the trial race data
 trial_results_combined <- trial_results_combined %>%
   select(-Colour,
          -Penalty) %>%
@@ -215,7 +227,6 @@ trial_results_combined <- trial_results_combined %>%
          distance = as.numeric(str_replace_all(distance, c("\\(" = "", "METRES\\)" = ""))),
          winning_time = gsub("Time: ","",str_extract_all(character,"Time: \\d+:\\d+.\\d+ "))
   )
-#saveRDS(trial_results_combined, glue("C:/Users/owenl/Documents/Owen/R_git/Horse_racing_analysis/Trial_results_last_month_{Sys.Date()}.rds"))
 
 #both trial and race data contain the same columns, so an analysis can be run on both combined if required
 
@@ -339,7 +350,7 @@ ggplot(every_favourite) +
 
 Seeing the variability in cashflows, and that this run ends with losing money, it it not simply enough to rely on the odds of the bookmaker and the public. It is important that we try to predict a winner. To do this initially, a generalized linear model is used to model a winning horse, using important variables such as the barrier, weight, track condition, and distance. Variables such as Horse, Jockey and Trainer have been excluded initially as these variables may only appear once or not at all in the training set.
 
-```{r picking winners, message=FALSE, warning=FALSE, message=FALSE}
+```{r picking winners}
 #splitting data by date to use last 2 days as test data, the rest as train data
 train_horse_data <- all_race_data_clean[!all_race_data_clean$Datetime>=max(all_race_data_clean$Datetime)-days(2),]
 test_horse_data <- all_race_data_clean[all_race_data_clean$Datetime>=max(all_race_data_clean$Datetime)-days(2),]
@@ -356,7 +367,7 @@ fitted.results <- predict(glm_winner,
 
 #fitted.results <- ifelse(fitted.results > 0.5,1,0)
 ##oh no, glm dont predict any horses winning
-cat(glue("The GLM's largest prediction for a horse winning is {round(max(fitted.results)*100,2)}%"))
+glue("The GLM's largest prediction for a horse winning is {round(max(fitted.results)*100,2)}%")
 ```
 
 As the GLM found no way to make any predictions where a horse would win, it was decided that we will try using a random forest to predict some winning horses via classification. 
@@ -426,8 +437,8 @@ nnet_model <- train(nn_train_df,
 nnet_predictions_test <-ifelse(predict(nnet_model, test_horse_data)>=0.5,1,0)
 
 #plotting neuralnet to show
-plotnet(nnet_model$finalModel, y_names = "IncomeLevel")
-title("Graphical Representation of our Neural Network")
+plotnet(nnet_model$finalModel, y_names = "Racing Factors")
+title("Graphical Representation of Horse Racing Neural Network")
 
 
 # Confusion matrix on test set
@@ -437,12 +448,13 @@ table(test_horse_data$winner, nnet_predictions_test)
 
 For the above, we can see that the neural net does predict more horses to win than the random forest, however its prediction of which horses will win is lower than the random forest. When selecting a model to pick a winning horse, a random forest would be used with the chosen variables used. 
 
+In future modifications of this analysis, more data will be used and a prediction on time will be analysed using factors such as the horse, trainer and jockey, however as most horses in this data only appear once, training a model on the horse, jockey and trainer is not useful, and may also be biased towards certain trainers and Jockeys who simply train/ride better horses due to their experience and success level (think of Gai Waterhouse and Damian Oliver as examples)
+
 ## Making money
 
 It has occurred to me that since favourites win approximately 40% of the time, it would be entirely possible to double down on betting each day until a favourite wins to generate a specified income daily - for lack of a better term, essentially making gambling on horses a side hustle.
 
 For this to work, the user would need a decent pool of available cash on hand, to sustain increasing bets until a winner pays out and returns all previous bets plus desired winnings. The other most important factor, would be that the better quits after winning their desired amount for that day. This essentially means that if the first favourite wins, the bettor is finished after one race for that day. If it takes 7 races for a favourite to win, the bettor will wager on all 7 races with increasing amounts until a winner emerges. 
-
 
 
 ```{r making money }
@@ -462,7 +474,7 @@ fav_betting_system_df <- race_data %>%
          new_bet = NA,
          total_outlay = NA) 
 
-#calculating the bet amount for each individual race, and the total outlay, for races after an initial race has failed. so all bet amount would be taken off the total_outlay once this is complete
+#calculating the bet amount for each individual race, and the total outlay, for races after an initial race has failed. so all bet amounts would be taken off the new_bet once this is complete
 for (i in 1:nrow(fav_betting_system_df)){
   if (i==1){
     fav_betting_system_df$bet[[i]] <- 1
@@ -528,17 +540,42 @@ fav_betting_system_df_bets <- profit_data %>%
 return(fav_betting_system_df_bets)
 }
 
+```
+
+Below a simulation on the last months worth of horse racing data has been run, and for different desired winning amounts, the amount of initial funds required isn't proportional. Below are runs of 50 dollars daily profit 100 dollars daily profit, and 200 dollars daily profit
+
+### $50 profit Daily
+
+```{r profit 50 daily}
 profit_50_daily <- daily_profit_function(all_race_data_clean, 50)
-graph_daily_profits(profit_50_daily)
 graph_daily_bets(profit_50_daily)
+graph_daily_profits(profit_50_daily)
 graph_total_profits(profit_50_daily)
-cat("below is a table showing all races bet on during the month, and the profit of each race")
 reactable(profit_system_df_function(profit_50_daily) %>% select(-character,
                                                                 -info,
                                                                 -race_info))
-
 ```
 
+### $100 profit Daily
 
-
+```{r profit 100 daily}
+profit_100_daily <- daily_profit_function(all_race_data_clean, 100)
+graph_daily_profits(profit_100_daily)
+graph_total_profits(profit_100_daily)
+reactable(profit_system_df_function(profit_100_daily) %>% select(-character,
+                                                                -info,
+                                                                -race_info))
 ```
+
+### $200 profit Daily
+
+```{r profit 200 daily}
+profit_200_daily <- daily_profit_function(all_race_data_clean, 200)
+graph_daily_profits(profit_200_daily)
+graph_total_profits(profit_200_daily)
+reactable(profit_system_df_function(profit_200_daily) %>% select(-character,
+                                                                -info,
+                                                                -race_info))
+```
+
+From the above you can see that to systematically run a profitable system daily off horse racing, you would need a substantial amount of initial funds however a system like this seems as if it could be run to generate tax free profits.
