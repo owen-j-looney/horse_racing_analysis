@@ -33,12 +33,13 @@ knitr::opts_chunk$set(
 ```
 
 
-# Introduction
+## Introduction
 
-This analysis devles into horse racing data, and attempting to identify ways to predict which horse will win, and the best way to make a profit from betting on horse racing in Australia. 
+This analysis devles into horse racing data, and attempting to identify ways to predict which horse will win, and a potential way to make a profit from betting on horse racing in Australia with reduced risk. 
 
 The horse racing data was sourced from the Racing Australia [website](https://www.racingaustralia.horse/Home.aspx) under the racing results tab. The Racing Australia website only stores data for the previous month of races, however it does include trial runs. The race data includes information such as the barrier, weight the horse is carrying, the trainer, the jockey, the date, the track, among many other attributes. The position of the horse at the end of the race, and the length the horse lost by (in lengths) are also included in the data, however lengths is an arbitrary unit of distance, so this was converted to metres by assuming a single horse length was 2.5 metres. 
-The horse racing data initially looks like this:
+
+Below shows the scraping of the horse racing data from the web, along with an example of what the horse racing data initially looks like.
 
 ```{r data download and clean, echo=TRUE}
 
@@ -239,7 +240,7 @@ reactable(head(all_race_data,1))
 ```
 
 
-After scraping the data, it was decided to convert each horses run into an approximate time estimation, by taking each race's winning time, and the using the trailing horses distance and estimating their final time by adding time allowing for each horse to cover their losing distance at the winners average speed throughout the race. These times look like this:
+After scraping the data, it was decided to convert each horses run into an approximate time estimation, by taking each race's winning time, and then using the trailing horses distance and estimating their final time by adding time allowing for each horse to cover their losing distance at the winners average speed throughout the race. These times look like this:
 
 ```{r adding times to all horses}
 # creating time function to approximate a finish time for all horses, not just winning horses
@@ -274,7 +275,8 @@ reactable(head(all_race_data %>%
 
 ```
 
-## Assessing Favouritism
+## Choose a Tab {.tabset .tabset-fade .tabset-dropdown}
+### Assessing Favouritism
 
 In this section, a brief assessment of the favouritism is assessed. Specifically, how often the favourite (the horse with the lowet odds at the time of the race) wins. 
 
@@ -327,7 +329,7 @@ ggplot(fav_win_odds) +
 
 After seeing that the favourite wins approximately 40% of the time, a quick trial of how betting $100 on every favourite would turn out financially was run, with the results being below. 
 
-```{R plot2}
+```{r plot2}
 ## looking at how you end up if you bet $100 on every favourite
 every_favourite <- all_race_data_clean %>%
   #only need the favourite for each race
@@ -348,9 +350,9 @@ ggplot(every_favourite) +
   theme_minimal()
 ```
 
-Seeing the variability in cashflows, and that this run ends with losing money, it it not simply enough to rely on the odds of the bookmaker and the public. It is important that we try to predict a winner. To do this initially, a generalized linear model is used to model a winning horse, using important variables such as the barrier, weight, track condition, and distance. Variables such as Horse, Jockey and Trainer have been excluded initially as these variables may only appear once or not at all in the training set.
+Seeing the variability in cashflows, and that this run ends with losing money, it it not simply enough to rely on the odds of the bookmaker and the public. It is important that we try to predict a winner. To do this initially, a generalized linear model is used to model a winning horse, using important variables such as the barrier, weight, track condition, and distance. Variables such as Horse, Jockey and Trainer have been excluded initially as these variables may only appear once or not at all in the training set, and there is not enough data to include variables that have values occuring once or not at all.
 
-```{r picking winners}
+```{r winners, results='markup'}
 #splitting data by date to use last 2 days as test data, the rest as train data
 train_horse_data <- all_race_data_clean[!all_race_data_clean$Datetime>=max(all_race_data_clean$Datetime)-days(2),]
 test_horse_data <- all_race_data_clean[all_race_data_clean$Datetime>=max(all_race_data_clean$Datetime)-days(2),]
@@ -370,7 +372,7 @@ fitted.results <- predict(glm_winner,
 glue("The GLM's largest prediction for a horse winning is {round(max(fitted.results)*100,2)}%")
 ```
 
-As the GLM found no way to make any predictions where a horse would win, it was decided that we will try using a random forest to predict some winning horses via classification. 
+The GLM found no way to make any predictions where a horse would win, it was decided that we will try using a random forest to predict some winning horses via classification. 
 
 ```{r random forest}
 library(randomForest)
@@ -389,7 +391,7 @@ cat("Predicted against actual results")
 table(test_horse_data$winner,predTrain)
 
 #randomforest model summary stats in sentence. 
-cat(glue("The Random forest does not predict a lot of horses to win (only {sum(predTrain==1)}), however its accuracy of {round(mean(predTrain == test_horse_data$winner)*100,2)}% is quite impressive."))
+cat(glue("The Random forest does not predict a lot of horses to win (only {sum(predTrain==1)}), however its total accuracy of {round(mean(predTrain == test_horse_data$winner)*100,2)}% is quite impressive."))
 
 #testing to see if betting on these races can be profitable
 test_horse_data_rf_bet <- test_horse_data %>% 
@@ -446,15 +448,15 @@ table(test_horse_data$winner, nnet_predictions_test)
 ```
 
 
-For the above, we can see that the neural net does predict more horses to win than the random forest, however its prediction of which horses will win is lower than the random forest. When selecting a model to pick a winning horse, a random forest would be used with the chosen variables used. 
+From the above, we can see that the neural net does predict more horses to win than the random forest, however its prediction of which horses will win is lower than the random forest. When selecting a model to pick a winning horse, a random forest would be used with the chosen variables used. 
 
 In future modifications of this analysis, more data will be used and a prediction on time will be analysed using factors such as the horse, trainer and jockey, however as most horses in this data only appear once, training a model on the horse, jockey and trainer is not useful, and may also be biased towards certain trainers and Jockeys who simply train/ride better horses due to their experience and success level (think of Gai Waterhouse and Damian Oliver as examples)
 
-## Making money
+### Making money
 
-It has occurred to me that since favourites win approximately 40% of the time, it would be entirely possible to double down on betting each day until a favourite wins to generate a specified income daily - for lack of a better term, essentially making gambling on horses a side hustle.
+It has occurred to me that since favourites win approximately 40% of the time, it would be entirely possible to double down on betting each day until a favourite wins to generate a specified income daily - for lack of a better term, essentially making gambling on horses a side hustle with a certain level of calculated risk (being the risk that your daily required betting increases over your initial balance).
 
-For this to work, the user would need a decent pool of available cash on hand, to sustain increasing bets until a winner pays out and returns all previous bets plus desired winnings. The other most important factor, would be that the better quits after winning their desired amount for that day. This essentially means that if the first favourite wins, the bettor is finished after one race for that day. If it takes 7 races for a favourite to win, the bettor will wager on all 7 races with increasing amounts until a winner emerges. 
+For this to work, the user would need a decent pool of available cash on hand, to sustain increasing bets until a winner pays out and returns all previous bets plus desired winnings. The other most important factor, would be that the better quits after winning their desired amount for that day. This essentially means that if the first favourite wins, the bettor is finished after one race for that day. If it takes 7 races for a favourite to win, the bettor will wager on all 7 races with increasing amounts until a winner emerges resulting in all outlayed bets repayed, along with the desired profit. 
 
 
 ```{r making money }
@@ -542,9 +544,9 @@ return(fav_betting_system_df_bets)
 
 ```
 
-Below a simulation on the last months worth of horse racing data has been run, and for different desired winning amounts, the amount of initial funds required isn't proportional. Below are runs of 50 dollars daily profit 100 dollars daily profit, and 200 dollars daily profit
+Below a simulation on the last months worth of horse racing data has been run, and for different desired winning amounts, the amount of initial funds required obviously varies depending on the desired daily win amount. Below are runs of 50 dollars daily profit, 100 dollars daily profit, and 200 dollars daily profit
 
-### $50 profit Daily
+#### $50 profit Daily
 
 ```{r profit 50 daily}
 profit_50_daily <- daily_profit_function(all_race_data_clean, 50)
@@ -556,7 +558,7 @@ reactable(profit_system_df_function(profit_50_daily) %>% select(-character,
                                                                 -race_info))
 ```
 
-### $100 profit Daily
+#### $100 profit Daily
 
 ```{r profit 100 daily}
 profit_100_daily <- daily_profit_function(all_race_data_clean, 100)
@@ -567,7 +569,7 @@ reactable(profit_system_df_function(profit_100_daily) %>% select(-character,
                                                                 -race_info))
 ```
 
-### $200 profit Daily
+#### $200 profit Daily
 
 ```{r profit 200 daily}
 profit_200_daily <- daily_profit_function(all_race_data_clean, 200)
@@ -579,3 +581,5 @@ reactable(profit_system_df_function(profit_200_daily) %>% select(-character,
 ```
 
 From the above you can see that to systematically run a profitable system daily off horse racing, you would need a substantial amount of initial funds however a system like this seems as if it could be run to generate tax free profits.
+
+I am curious if investors with a decent amount of free cash would spend their time betting with a system like this. I am also curious if there are any regulations or rules against betting in a system like shown above, and if gambling companies are testing and assessing their customers habits for systematic attempts to profit off their business?
