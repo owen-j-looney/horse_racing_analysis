@@ -1,0 +1,1767 @@
+---
+title: "Untitled"
+author: "Owen Looney"
+date: "28/04/2023"
+output: html_document
+---
+
+```{r initial data load, include=FALSE}
+library(dplyr)
+library(tidyverse)
+library(abettor)
+library("jsonlite")
+library("httr")
+
+abettor::loginBF(username = "owen.looney23169@gmail.com",
+                 password = "Henry.818",
+                 #applicationKey = "2u95RH67CIUQQXr9"
+                 applicationKey = "2u95RH67CIUQQXr9"
+                 )
+
+marketCat <- listMarketCatalogue(eventTypeIds = "7", marketCountries = "AU", marketTypeCodes = "WIN", toDate = (format(Sys.time() + 86400 * 5, "%Y-%m-%dT%TZ"))) %>%
+  filter(grepl("*Trot", marketName)==F,
+         grepl("*Pace*", marketName)==F)
+
+marketPlace <- listMarketCatalogue(eventTypeIds = "7", marketCountries = "AU", marketTypeCodes = "PLACE", toDate = (format(Sys.time() + 86400 * 5, "%Y-%m-%dT%TZ"))) %>%
+  filter(grepl("*Trot", marketName)==F,
+         grepl("*Pace*", marketName)==F)
+
+market_id <- marketCat$marketId 
+
+length(marketCat$marketId)
+
+odds <- c()
+odds_runners <- c()
+for (i in 1:length(marketCat$marketId)){
+
+odds[[i]] <- abettor::listMarketBook(marketIds = market_id[[i]],
+                                priceData = "EX_BEST_OFFERS",
+                                bestPricesDepth = 0) 
+
+odds_runners[[i]] <- as.data.frame(odds[[i]][["runners"]]) %>%
+  unnest(ex) %>%
+  unnest(availableToBack) %>%
+  dplyr::select(selectionId,
+         status,
+         price)
+
+}
+
+races <- c()
+for (i in 1:length(market_id)) {
+  races[[i]] <- as.data.frame(marketCat$runners[[i]]) %>%
+    unnest(metadata) %>%
+    mutate(race_info = paste0(marketCat$marketName[[i]],",", marketCat$event$venue[[i]]))
+  names(races)[[i]] <- paste0(marketCat$marketName[[i]],",", marketCat$event$venue[[i]])
+}
+
+
+
+Horse_odds <- do.call("rbind", odds_runners) %>%
+  na.omit()
+Horse_race <- do.call("rbind", races)  
+
+
+runners_horse <- Horse_odds %>%
+  inner_join(Horse_race, by = c("selectionId")) %>%
+  group_by(selectionId, race_info) %>%
+  mutate(fluc = 1:n(),
+         avg_price = mean(price)) %>%
+  filter(fluc == min(fluc)) %>%
+  mutate(Horse = str_to_upper(runnerName),
+         Horse = gsub("\\d+\\.","",Horse),
+         Horse = gsub(" ","",Horse),
+         No = as.numeric(CLOTH_NUMBER_ALPHA),
+         Jockey = gsub("[^[:alpha:] ]", "", JOCKEY_NAME),
+         Jockey = gsub(" ", "", Jockey),
+         Trainer = gsub("[^[:alpha:] ]", "", JOCKEY_NAME),
+         Trainer = gsub(" ", "", Jockey),
+         odds = price,
+         STALL_DRAW = as.numeric(STALL_DRAW)) %>%
+  ungroup() %>%
+  dplyr::select(Horse,
+         odds,
+         STALL_DRAW,
+         No)
+
+############ Getting todays race data to predict on ####
+library(rvest)
+library(lubridate)
+library(glue)
+base_url <- 'https://www.racingaustralia.horse/FreeFields/Calendar.aspx'
+
+
+#getting required urls
+#base_url <- "https://www.racingaustralia.horse/FreeFields/Calendar_Results.aspx"
+
+state_list <- c("NSW",
+                "QLD",
+                "ACT",
+                "VIC",
+                "TAS",
+                "SA",
+                "WA",
+                "NT")
+
+#creating blank list so i can get a url for race results for each state
+state_list_url <- c()
+
+#generating urls for each states racing results over the last month
+for (i in 1:length(state_list)) {
+  state_list_url[[i]] <- paste0(base_url,"?State=", state_list[i])
+}
+
+
+#generating a list of urls to run through to get all race data for last month
+results <- function(url_list){
+  paste0("https://www.racingaustralia.horse",
+         read_html(url_list) %>%
+           html_nodes("a") %>%       
+           # find all links in the page
+           html_attr("href") %>%
+           unique() %>%
+           str_subset("/FreeFields/Form")
+  )
+}
+
+#getting list of all urls with race data and converting to one list
+race_results_urls <- map(state_list_url, results) %>%
+  purrr::flatten()
+
+#creating a key so we only keep urls for tomorrows races to predict on
+tomorrow_url_key <- paste0(year(Sys.Date()+1),
+                           month(Sys.Date()+1,label = T, abbr = T),                           ifelse(day(Sys.Date()+1)<10,paste0("0",day(Sys.Date()+1)),day(Sys.Date()+1)))
+#creating today url key if this is run in the am
+today_url_key <- paste0(year(Sys.Date()),
+                           month(Sys.Date(),label = T, abbr = T),                           ifelse(day(Sys.Date())<10,paste0("0",day(Sys.Date())),day(Sys.Date())))
+
+
+#separating out trial and race data
+trial_results_urls <- race_results_urls[grepl("Trial", race_results_urls)]
+
+racing_results_urls <- race_results_urls[!grepl("Trial", race_results_urls)]
+
+racing_results_urls <- as.list(grep(today_url_key, racing_results_urls, value = T))
+  
+
+#creating function to extract all tables from each url 
+read_html_tbls <- function(url) {
+  html <- read_html(url) %>% 
+    html_nodes("table") %>% 
+    html_table() 
+  
+
+  #close(url)
+  return(html)
+}
+
+track_info <- c()
+
+for (i in 1:length(racing_results_urls)){
+track_info[[i]] <- as.character(read_html(racing_results_urls[[i]]) %>% 
+      html_nodes(".race-venue-bottom") %>%
+      html_text())
+}
+
+
+#creating blank list for race tables to be appended to
+race_tables <- c()
+
+#appending all race tables
+race_tables <- map(racing_results_urls,read_html_tbls)
+
+#naming each group of tables with their date and location
+names(race_tables) <- sub('.*Key=','',racing_results_urls)
+
+for (n in 1:length(race_tables)){
+  #some days the first table is a 4 column table which contains no useful information and these are to be filtered out (on days like public holidays etc. where there are certain specialties applied by the looks of it)
+  for (i in 1:length(race_tables[[n]])) {
+      #taking useful data from previous tables and converting it into columns in current table
+      race_tables[[n]][[i]] <-race_tables[[n]][[i]] %>% 
+        mutate(info = glue("{names(race_tables)[[n]]}"))
+    }
+  }
+
+for (n in 1:length(race_tables)){
+  for (i in 1:length(race_tables[[n]])){
+    race_tables[[n]][[i]] <- race_tables[[n]][[i]] %>%
+      mutate(track_info = track_info[[n]])
+  }
+}
+
+
+race_table <- purrr::flatten(race_tables)
+
+#filtering out tables that have non race results or race information
+#appending race info table as a character string to the relevant race so it can be used
+for (n in 2:length(race_table)){
+  #some days the first table is a 4 column table which contains no useful information and these are to be filtered out (on days like public holidays etc. where there are certain specialties applied by the looks of it)    
+  if (ncol(race_table[[n]])==3){
+      race_table[[n]] <- race_table[[n]]
+    } else if (ncol(race_table[[n-1]])==3){
+      race_table[[n]] <- race_table[[n]]
+      } else {
+      race_table[[n]] <- tibble()
+      }
+}
+
+race_tables_tomorrow <- Filter(function(x) length(x) > 1,race_table)  
+
+
+for (i in 1:length(race_tables_tomorrow)) {
+    #keeping tables that are 11 columns wide - containing race data, all others containing 1 col are race info or simply abandoned races that are not useful.
+    if (ncol(race_tables_tomorrow[[i]])==3){
+      NA
+    } else {
+      #taking useful data from previous tables and converting it into columns in current table
+      race_tables_tomorrow[[i]] <-race_tables_tomorrow[[i]] %>% 
+        mutate(character = as.character(race_tables_tomorrow[[i-1]][[1]]),
+               race_info = as.character(names(race_tables_tomorrow[[i-1]][1])))
+    }
+  }
+
+race_tables_tomoz <- Filter(function(x) length(x) > 3,race_tables_tomorrow) 
+
+library(plyr)
+
+race_tomorrow_combined <- do.call("rbind.fill",
+                                  race_tables_tomoz)
+detach("package:plyr", unload = TRUE)
+
+race_tomorrow_combined <- race_tomorrow_combined %>%
+  mutate(info = gsub('%2C',",", info),
+         info = gsub('%20'," ", info),
+         Weight = as.numeric(gsub("kg.*","", Weight)),
+         #converting Date to an actual date in required format
+         Date_format = as.Date(str_split(info, ",") %>% map_chr(., 1),
+                               format('%Y%b%d')),
+         #splitting the info column into useful data such as state & racecourse
+         State = as.factor(str_split(info, ",") %>% map_chr(., 2)),
+         Racecourse = as.factor(str_split(info, ",") %>% map_chr(., 3)),
+         #getting race number
+         Race = as.factor(str_extract(race_info, "^Race \\d+")),
+         #converting date to a day of the week - purely as Wednesdays and Saturdays are bigger meets
+         Day_of_week = as.factor(format(Date_format, '%a')),
+         #getting race/trial distance
+         distance = str_extract_all(race_info,"\\(\\d{1,} METRES\\)"),
+         #converting distance to number
+         distance = as.numeric(str_replace_all(distance, c("\\(" = "", "METRES\\)" = ""))),
+         track_info = gsub("\\r","",
+                           gsub("\\n", "",
+                                gsub("\\t","",track_info))),
+         track_condition = as.factor(as.character(str_extract_all(race_tomorrow_combined$track_info,"Track Condition: .*Weather:"))),
+         track_condition = gsub("Weather:","", track_condition),
+         #getting track condition which is critically important to clean properly
+         trackcondition = as.factor(substr(str_extract_all(race_tomorrow_combined$track_info,"Track Condition: .* [\\d+, ]{0,}W"),1,24)),
+         trackcondition = gsub(" ","",
+                                gsub("W","",
+                                     gsub(":","",trackcondition))),
+         RaceID = paste(info,",",Race),
+         Race_time = str_extract(race_info,"\\d+:\\d+[AP]M"),
+         Horse = gsub("*\\(.{1+}\\)$","", Horse),
+         Horse = gsub(" {1+}","",Horse),
+         Horse = gsub("[^[:alpha:] ]", "", Horse),
+         Jockey = gsub(" {1+}","",Jockey),
+         Jockey = gsub("[^[:alpha:] ]", "", Jockey),
+         Jockey = gsub("*\\(.{1+}\\)", "", Jockey),
+         Jockey = gsub("kg$","",Jockey),
+         Trainer = gsub(" {1+}","",Trainer),
+         Trainer = gsub("[^[:alpha:] ]", "", Trainer),
+         trackcondition = gsub(" {1+}","",track_condition),
+         trackcondition = gsub("\\_{1+}","",trackcondition),
+         trackcondition = gsub(":{1+}","",trackcondition),
+         #trackcondition = gsub("TrackConditionHeavy1", "TrackConditionHeavy10",trackcondition),
+         win_prize = as.numeric(gsub(" 2nd ","",
+                                     gsub(",","",str_split(character, "\\$") %>% map_chr(., 3)))),
+         prize_pool = as.numeric(gsub(".1st ","",
+                                      gsub(",","",str_split(character, "\\$") %>% map_chr(., 2)))))
+
+race_tomorrow_combined_test <- race_tomorrow_combined %>%
+  mutate(trackcondition = gsub("TrackConditionGoode", "TrackConditionGood", trackcondition)) %>%
+  mutate(Bar = Barrier,
+         win_prize = as.numeric(gsub(" 2nd ","",
+                                     gsub(",","",str_split(character, "\\$") %>% map_chr(., 3)))),
+         prize_pool = as.numeric(gsub(".1st ","",
+                                      gsub(",","",str_split(character, "\\$") %>% map_chr(., 2)))))
+
+runners_with_odds <- full_join(runners_horse,race_tomorrow_combined_test, by = c("Horse" = "Horse")) %>%
+  dplyr::select(-`Probable Weight`,
+                -Penalty,
+                -`Hcp Rating`) %>%
+  mutate(Jockey = ifelse(Jockey=="", NA,Jockey))%>%
+  mutate(Bar = Barrier) %>%
+  na.omit()
+
+#consolidating the historical data
+setwd("C:/Users/owenl/Documents/Owen/R_git/Horse_racing_analysis")
+library(tidyverse)
+library(reactable)
+library(reshape2)
+library(glue)
+library(dplyr)
+library(caret)
+library(lubridate)
+
+df <- list.files(pattern = ".rds") %>%
+  map(readRDS)
+
+
+df1 <- df %>%
+  bind_rows %>%
+  unique()
+
+library(rvest)
+library(xml2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+library(curl)
+library(glue)
+library(ggplot2)
+library(caret)
+library(furrr)
+library(future)
+
+future::plan(multisession, workers = 4)
+
+
+
+#getting list of 
+base_url <- "https://www.racingaustralia.horse/FreeFields/Calendar_Results.aspx"
+
+state_list <- c("NSW",
+                "QLD",
+                "ACT",
+                "VIC",
+                "TAS",
+                "SA",
+                "WA",
+                "NT")
+
+#creating blank list so i can get a url for race results for each state
+state_list_url <- c()
+
+#generating urls for each states racing results over the last month
+for (i in 1:length(state_list)) {
+  state_list_url[[i]] <- paste0(base_url,"?State=", state_list[i])
+}
+
+#generating a list of urls to run through to get all race data for last 30 days
+results <- function(url_list){
+  paste0("https://www.racingaustralia.horse",
+         read_html(url_list) %>%
+           html_nodes("a") %>%       
+           # find all links in the page
+           html_attr("href") %>%
+           unique() %>%
+           str_subset("/FreeFields/Results")
+  )
+}
+
+#getting list of all urls with race data and converting to one list
+race_results_urls <- future_map(state_list_url, results) %>%
+  purrr::flatten() 
+
+#separating out trial and race data
+trial_results_urls <- race_results_urls[grepl("Trial", race_results_urls)]
+
+racing_results_urls <- race_results_urls[!grepl("Trial", race_results_urls)]
+
+#creating function to extract all tables from each url 
+read_html_tbls <- function(url) {
+  url = url(url, 'rb')
+  html <- read_html(url) %>%
+    html_table()
+  
+  close(url)
+  return(html)
+}
+
+#creating blank list for race tables to be appended to
+race_tables <- c()
+
+#appending all race tables
+race_tables <- future_map(racing_results_urls,read_html_tbls)
+
+#creating blank list for trial tables to be appended to
+trial_tables <- c()
+
+#appending all race tables
+trial_tables <- future_map(trial_results_urls,read_html_tbls)
+
+#naming each group of tables with their date and location
+names(trial_tables) <- sub('.*Key=','',trial_results_urls)
+
+
+#naming each group of tables with their date and location
+names(race_tables) <- sub('.*Key=','',racing_results_urls)
+
+#removing abandoned races with no data
+race_tables_non_abndn <- Filter(function(x) length(x) > 1,race_tables)
+
+#removing abandoned races with no data
+trial_tables_non_abndn <- Filter(function(x) length(x) > 1,trial_tables)
+
+#filtering out tables that have non race results or race information
+#appending race info table as a character string to the relevant race so it can be used
+for (n in 1:length(race_tables_non_abndn)){
+  #some days the first table is a 4 column table which contains no useful information and these are to be filtered out (on days like public holidays etc. where there are certain specialties applied by the looks of it)
+  if (ncol(race_tables_non_abndn[[n]][[1]])==4){
+    race_tables_non_abndn[[n]] <- race_tables_non_abndn[[n]][-1]
+  } else {
+    NULL
+  }
+  for (i in 1:length(race_tables_non_abndn[[n]])) {
+    #keeping tables that are 11 columns wide - containing race data, all others containing 1 col are race info or simply abandoned races that are not useful.
+    if (ncol(race_tables_non_abndn[[n]][[i]])!=11){
+      NA
+    } else {
+      #taking useful data from previous tables and converting it into columns in current table
+      race_tables_non_abndn[[n]][[i]] <-race_tables_non_abndn[[n]][[i]] %>% 
+        mutate(character= as.character(race_tables_non_abndn[[n]][[i-1]]),
+               race_info = as.character(names(race_tables_non_abndn[[n]][[i-1]])),
+               info = glue("{names(race_tables_non_abndn)[[n]]}"))
+    }
+  }
+}
+
+
+
+#filtering out tables that have non trial results or race information
+#appending race info table as a character string to the relevant race so it can be used
+#running same query as above - did not create a function due to data extraction occuring once and this applying to 2 data sets - copy and paste with changes is just as time efficient as making an iterable function
+for (n in 1:length(trial_tables_non_abndn)){
+  if (ncol(trial_tables_non_abndn[[n]][[1]])==4){
+    trial_tables_non_abndn[[n]] <- trial_tables_non_abndn[[n]][-1]
+  } else {
+    NULL
+  }
+  for (i in 1:length(trial_tables_non_abndn[[n]])) {
+    if (ncol(trial_tables_non_abndn[[n]][[i]])!=11){
+      NA
+    } else {
+      trial_tables_non_abndn[[n]][[i]] <- trial_tables_non_abndn[[n]][[i]] %>%
+        mutate(character = as.character(trial_tables_non_abndn[[n]][[i-1]]),
+               race_info = as.character(names(trial_tables_non_abndn[[n]][[i-1]])),
+               info = glue("{names(trial_tables_non_abndn)[[n]]}"))
+    }
+  }
+}
+
+
+#flattening out both race and trial results
+race_results_list <- purrr::flatten(race_tables_non_abndn)
+
+trial_results_list <- purrr::flatten(trial_tables_non_abndn)
+
+#keeping only tables that have anough columns to contain actual race data, not simply information regarding each race
+filtered_race_results_list <- Filter(function(x) ncol(x) == 14,race_results_list)
+
+filtered_trial_results_list <- Filter(function(x) ncol(x) == 14,trial_results_list)
+
+#converting each list into a single df
+race_results_combined <- do.call("rbind", filtered_race_results_list) 
+
+trial_results_combined <- do.call("rbind", filtered_trial_results_list) 
+
+#cleaning some data and extracting some information into columns for both race and trial data
+race_results_combined <- race_results_combined %>%
+  dplyr::select(-Colour,
+         -Penalty) %>%
+  mutate(Finish = as.numeric(Finish),
+         odds = as.numeric(gsub(".*?([0-9.]+).*", "\\1",`Starting Price`)),
+         Weight = as.numeric(gsub("kg.*","", Weight)),
+         Date_format = as.Date(str_split(info, ",") %>% map_chr(., 1),
+                               format('%Y%b%d')),
+         State = as.factor(str_split(info, ",") %>% map_chr(., 2)),
+         Racecourse = as.factor(str_split(info, ",") %>% map_chr(., 3)),
+         Race = as.factor(str_extract(race_info, "^Race \\d+")),
+         Day_of_week = as.factor(format(Date_format, '%a')),
+         distance = str_extract_all(race_info,"\\(\\d\\d\\d\\d METRES\\)"),
+         track_condition = as.factor(as.character(str_extract_all(race_results_combined$character,"Track Condition: .* Time:"))),
+         distance = as.numeric(str_replace_all(distance, c("\\(" = "", "METRES\\)" = ""))),
+         winning_time = gsub("Time: ","",str_extract_all(character,"Time: \\d+:\\d+.\\d+ "))
+         ) %>%
+  na.omit() %>%
+  filter(!Date_format %in% df1$Date_format)
+
+todays_runs <- runners_with_odds %>%
+  transmute(Finish = 0,No. = No.x,Horse,Trainer,Jockey,Margin = NA,Bar.  = STALL_DRAW,Weight,`Starting Price` = odds,character,race_info,info,odds,Date_format,State,Racecourse,Race,Day_of_week,distance, track_condition,winning_time = NA)
+
+
+df_1 <- rbind(df1, race_results_combined, todays_runs)
+
+# creating time function to approximate a finish time for all horses, not just winning horses
+time_function <- function(dataset){
+  dataset$winning_time_sec<- as.numeric(gsub(":","",str_extract(dataset$winning_time,":\\d+.\\d+")))
+  
+  dataset$winning_time_min <- as.numeric(str_extract(dataset$winning_time,"\\d+"))*60
+  dataset$winning_time_total <- dataset$winning_time_min+dataset$winning_time_sec
+  dataset$Margin <- gsub("L","",dataset$Margin) 
+  ## using the assumption that a horse length is roughly 2.5 metres
+  dataset$Margin_Metres <- as.numeric(dataset$Margin)*2.5
+  dataset$winner_MperSec <- dataset$distance/dataset$winning_time_total
+  
+  dataset$time <- dataset$winning_time_total+
+    ifelse(is.na(dataset$Margin_Metres/dataset$winner_MperSec),
+           0,
+           dataset$Margin_Metres/dataset$winner_MperSec)
+  return(dataset)
+}
+
+df2 <- time_function(df_1)
+
+df3 <- df2 %>%
+  dplyr::select(-winning_time,
+         -winning_time_sec,
+         -winning_time_min,
+         -winning_time_total,
+         -winner_MperSec) %>%
+  dplyr::mutate(RaceID = paste(info,",",Race),
+         ID = paste(info,",",Race,"Finish-", Finish),
+         Margin_Metres = ifelse(is.na(Margin_Metres)==T, 0, Margin_Metres),
+         winner = ifelse(Finish==1,1,0),
+         track_condition = gsub('[^[:digit:]]{,2}$','',track_condition),
+         Weight = ifelse(is.na(Weight),0,Weight),
+         Race_time = str_extract(race_info,"\\d+:\\d+[AP]M"),
+         Datetime = as.POSIXct(paste(Date_format, " ", Race_time), format = "%Y-%m-%d %I:%M%p"),
+         #track_condition = as.factor(as.character(str_extract_all(df2$character,"Track Condition: .* T"))),
+         track_condition = gsub(" Ti","", track_condition),
+         Datetime = ifelse(State=="WA",
+                           Datetime+dhours(2),
+                           ifelse(State %in% c("SA","NT"),
+                                  Datetime+dhours(1.5),
+                                  Datetime)),
+         Race_time = format(Datetime, format = "%I:%M%p")) %>%
+  filter(#time >0,
+         is.na(Finish)!=T,
+         track_condition!="character(0",
+         is.na(distance)==F) %>%
+  arrange(Datetime,RaceID, Finish) %>%
+  dplyr::mutate(Bar = Bar.,
+         Horse = gsub("*\\(.{1+}\\)$","", Horse),
+         Horse = gsub(" {1+}","",Horse),
+         Horse = gsub("[^[:alpha:] ]", "", Horse),
+         Jockey = gsub(" {1+}","",Jockey),
+         Jockey = gsub("[^[:alpha:] ]", "", Jockey),
+         Jockey = gsub("*\\(.{1+}\\)", "", Jockey),
+         Jockey = gsub("latealt$","",Jockey),
+         Jockey = gsub("kg$","",Jockey),
+         Trainer = gsub(" {1+}","",Trainer),
+         Trainer = gsub("[^[:alpha:] ]", "", Trainer),
+         track_condition = gsub(" {1+}","",track_condition),
+         track_condition = gsub("\\_{1+}","",track_condition),
+         trackcondition = gsub(":{1+}","",track_condition),
+         Lengths = ifelse(is.na(as.numeric(Margin)),0,as.numeric(Margin)),
+         adj_dist = plyr::round_any(distance,50),
+         prob = 1/odds
+         ) %>%
+  filter(!is.na(odds)) 
+
+track_pars <- df3 %>% 
+  #filter(Date_format<'2022-10-01') %>% 
+  group_by(Racecourse, Date_format, distance) %>%
+  mutate(daily_par_time = mean(time, na.rm=T),
+         runs = n()) %>%
+  summarise(Racecourse, Date_format, distance, daily_par_time, runs) %>% 
+  unique() %>%
+  arrange(Racecourse, distance, Date_format) %>%
+  group_by(Racecourse, distance) %>%
+  mutate(med_par_time =cummean(daily_par_time),
+         tot_runs = cumsum(runs),
+         pred_par_time = med_par_time,
+         date_to_apply = lead(Date_format,1)
+         ) %>%
+  dplyr::select(Racecourse, distance, date_to_apply,tot_runs, pred_par_time) %>%
+  ungroup()
+
+distance_pars <- df3 %>% 
+  #filter(Date_format<'2022-10-01') %>% 
+  group_by(adj_dist, trackcondition) %>%
+  mutate(avg_dist_time = median(time, na.rm =T)) %>%
+  summarise(Date_format, adj_dist, trackcondition, avg_dist_time) %>% unique()
+
+dff <- left_join(df3 #%>% filter(Date_format<'2022-10-01'),
+                 , track_pars, by = c("Racecourse", "Date_format" = "date_to_apply", "distance")) %>%
+  left_join(distance_pars, by = c("Date_format", "adj_dist", "trackcondition")) %>%
+  group_by(adj_dist,Horse) %>%
+  mutate(sr = round((pred_par_time/time)*100,2),
+         dist_sr = round((avg_dist_time/time)*100,2),
+         mean_sr = mean(sr),
+         mean_dist_sr = mean(dist_sr),
+         track_dif = round((pred_par_time-time),2),
+         mean_track_dif = mean(track_dif))
+
+horse_sr_Ratings <- dff %>% 
+  dplyr::select(adj_dist,Horse, mean_sr, mean_dist_sr, mean_track_dif) %>% unique()
+
+df_5 <- left_join(df3, track_pars, by = c("Date_format" = "date_to_apply","Racecourse","distance")) %>%
+  #filter(!is.na(time)) %>%
+  unique() %>%
+  distinct(Horse,RaceID, .keep_all = T) %>%
+  ungroup() %>%
+  mutate(rand_var = rnorm(nrow(.),0,0.05)) %>%
+  group_by(RaceID) %>%
+  mutate(rand_odds = prob+abs(rand_var),
+         rand_odds_sum = sum(rand_odds),
+         prob_adj = rand_odds/rand_odds_sum,
+         odds_adj = 1/prob_adj) %>%
+  ungroup() %>%
+  filter(odds>=1)
+#%>% mutate(pred_par_time = ifelse(is.na(pred_par_time), time, pred_par_time),)
+
+lm1 <- lm(time ~ pred_par_time + trackcondition, data = df_5 %>% filter(Date_format != max(Date_format)))
+coefs<- as.data.frame(lm1$coefficients)
+coefs <- coefs %>%
+  mutate(trackcondition = gsub("trackcondition","",row.names(.)),
+         track_coeficient = `lm1$coefficients`) %>%
+  dplyr::select(track_coeficient, trackcondition)
+
+#lm2 <- lm(time ~ pred_par_time + Bar, data = df_5)
+#coef2 <- as.data.frame(lm2$coefficients)
+
+
+speed_ratings <- df_5 %>%
+  filter(time>0|is.na(time),
+         pred_par_time>0) %>%
+  mutate(sr = as.numeric(round((pred_par_time/time)*100,3)),
+         valid_run = ifelse(is.na(sr),
+                            0,
+                            1),
+         sr = ifelse(is.na(sr),
+                     round((mean(sr, na.rm = T)-sd(sr, na.rm = T)*3),3),
+                     sr)) %>%
+  group_by(Horse) %>%
+  arrange(Horse, Date_format) %>%
+  distinct(Horse, Date_format, .keep_all = T) %>%
+  mutate(Horse_runs = 1:n(),
+         valid_runs = lag(cumsum(valid_run),1),
+         Horse_sr = lag(cummean(sr),1),
+         alpha = 0.5,
+         ewm_5 = ifelse(valid_runs<6,
+                        Horse_sr,
+                          (1-alpha)*lag(sr,1)+
+                          ((1-alpha)^2)*lag(sr,2)+
+                          ((1-alpha)^3)*lag(sr,3)+
+                          ((1-alpha)^4)*lag(sr,4)+
+                          ((1-alpha)^5)*lag(sr,5))) %>%
+  dplyr::select(Horse,Date_format, distance,Horse_sr,valid_runs,ewm_5) %>% ungroup()
+
+Jockey_perception <- df_5 %>%
+  select(Jockey, Racecourse, prob, RaceID, Date_format, winner) %>%
+  group_by(RaceID) %>%
+  mutate(race_tot_odds = sum(prob),
+         adj_prob = prob/race_tot_odds,
+         adj_var = adj_prob*(1-adj_prob),
+         runs = 1,
+         Jockey = gsub("latealt$","",Jockey)) %>%
+  group_by(Jockey, Racecourse, Date_format) %>%
+  mutate(est_daily_wins_J = sum(prob, na.rm = T),
+         est_daily_var = sum(adj_var, na.rm = T),
+         daily_runs = sum(runs, na.rm = T),
+         daily_wins = sum(winner, na.rm = T)) %>%
+  group_by(Jockey) %>%
+  select(Jockey, Racecourse, Date_format, est_daily_wins_J, est_daily_var, daily_runs, daily_wins) %>%
+  distinct() %>%
+  arrange(Jockey,Date_format) %>%
+  mutate(date_to_apply = lead(Date_format,1),
+         est_wins = cumsum(est_daily_wins_J),
+         est_var = cumsum(est_daily_var),
+         est_sd = est_var^0.5,
+         total_runs = cumsum(daily_runs),
+         tot_wins = cumsum(daily_wins),
+         f_x_Jockey = pnorm(tot_wins,est_wins,est_sd),
+         f_x_Jockeys = ifelse(total_runs<50,0.5,f_x_Jockey),
+         f_x_Jockey_adj = lag(f_x_Jockeys,1),
+         f_x_Jockey_adj = ifelse(is.na(f_x_Jockey_adj),
+                                 0.5,
+                                 f_x_Jockey_adj),
+         Jockey_value = est_daily_wins_J*f_x_Jockey_adj,
+         mean_est_wins_J = cummean(est_daily_wins_J),
+         mean_est_wins_J = lag(mean_est_wins_J,1),
+         race_est_wins_J = mean_est_wins_J/daily_runs) %>%
+  arrange(desc(Date_format), Jockey, Racecourse) %>% 
+  select(Jockey, Date_format, est_daily_wins_J,f_x_Jockey_adj, Jockey_value, mean_est_wins_J, race_est_wins_J)
+
+Jockey_Course_perception <- df_5 %>%
+  select(Jockey, Racecourse, odds, prob, RaceID, Date_format, winner) %>%
+  group_by(RaceID) %>%
+  mutate(race_tot_odds = sum(prob),
+         adj_prob = (prob)/race_tot_odds,
+         adj_var = adj_prob*(1-adj_prob),
+         runs = 1) %>%
+  group_by(Jockey, Racecourse, Date_format) %>%
+  mutate(est_daily_wins_C = sum((1/odds), na.rm = T),
+         est_daily_var = sum(adj_var, na.rm = T),
+         daily_runs = sum(runs, na.rm = T),
+         daily_wins = sum(winner, na.rm = T)) %>%
+  group_by(Jockey, Racecourse) %>%
+  select(Jockey, Racecourse, Date_format, est_daily_wins_C, est_daily_var, daily_runs, daily_wins) %>%
+  distinct() %>%
+  arrange(Jockey,Date_format) %>%
+  mutate(date_to_apply = lead(Date_format,1),
+         est_wins = cumsum(est_daily_wins_C),
+         est_var = cumsum(est_daily_var),
+         est_sd = est_var^0.5,
+         total_runs = cumsum(daily_runs),
+         tot_wins = cumsum(daily_wins),
+         f_x_Jockey_R = pnorm(tot_wins,est_wins,est_sd),
+         f_x_Jockey_Rs = ifelse(total_runs<50,0.5,f_x_Jockey_R),
+         f_x_Jockey_R_adj = lag(f_x_Jockey_Rs,1),
+         f_x_Jockey_R_adj = ifelse(is.na(f_x_Jockey_R_adj),0.5,f_x_Jockey_R_adj),
+         jockey_course_value = est_daily_wins_C*f_x_Jockey_R_adj,
+         mean_est_wins_C = cummean(est_daily_wins_C),
+         mean_est_wins_C = lag(mean_est_wins_C,1),
+         race_est_wins_C = mean_est_wins_C/daily_runs) %>%
+  arrange(desc(Date_format), Jockey, Racecourse) %>% 
+  select(Jockey, Racecourse,Date_format, est_daily_wins_C, f_x_Jockey_R_adj, jockey_course_value, mean_est_wins_C, race_est_wins_C)
+
+
+Trainer_Course_perception <- df_5 %>%
+  select(Trainer, Racecourse, prob, odds, RaceID, Date_format, winner) %>%
+  group_by(RaceID) %>%
+  mutate(race_tot_odds = sum(prob),
+         adj_prob = (prob)/race_tot_odds,
+         adj_var = adj_prob*(1-adj_prob),
+         runs = 1) %>%
+  group_by(Trainer, Racecourse, Date_format) %>%
+  mutate(est_daily_wins_T = sum((1/odds), na.rm = T),
+         est_daily_var = sum(adj_var, na.rm = T),
+         daily_runs = sum(runs, na.rm = T),
+         daily_wins = sum(winner, na.rm = T)) %>%
+  group_by(Trainer, Racecourse) %>%
+  select(Trainer, Racecourse, Date_format, est_daily_wins_T, est_daily_var, daily_runs, daily_wins) %>%
+  distinct() %>%
+  arrange(Trainer,Date_format) %>%
+  mutate(date_to_apply = lead(Date_format,1),
+         est_wins = cumsum(est_daily_wins_T),
+         est_var = cumsum(est_daily_var),
+         est_sd = est_var^0.5,
+         total_runs = cumsum(daily_runs),
+         tot_wins = cumsum(daily_wins),
+         f_x_Trainer_R = pnorm(tot_wins,est_wins,est_sd),
+         f_x_Trainer_Rs = ifelse(total_runs<50,0.5,f_x_Trainer_R),
+         f_x_Trainer_R_adj = lag(f_x_Trainer_Rs, 1),
+         f_x_Trainer_R_adj = ifelse(is.na(f_x_Trainer_R_adj),0.5,f_x_Trainer_R_adj),
+         trainer_course_value = est_daily_wins_T*f_x_Trainer_R_adj,
+         mean_est_wins_T = cummean(est_daily_wins_T),
+         mean_est_wins_T = lag(mean_est_wins_T,1),
+         race_est_wins_T = mean_est_wins_T/daily_runs
+         ) %>%
+  arrange(desc(Date_format), Trainer, Racecourse) %>% 
+  select(Trainer, Racecourse,Date_format, est_daily_wins_T, f_x_Trainer_R_adj, trainer_course_value, mean_est_wins_T, race_est_wins_T)
+
+box_perception <- df_5 %>%
+  select(Bar, Racecourse, odds,prob, RaceID, Date_format, winner) %>%
+  group_by(RaceID) %>%
+  mutate(race_tot_odds = sum(prob),
+         adj_prob = prob/race_tot_odds,
+         adj_var = adj_prob*(1-adj_prob),
+         runs = 1) %>%
+  group_by(Bar, Racecourse, Date_format) %>%
+  mutate(est_daily_wins_B = sum(1/odds, na.rm = T),
+         est_daily_var = sum(adj_var, na.rm = T),
+         daily_runs = sum(runs, na.rm = T),
+         daily_wins = sum(winner, na.rm = T)) %>%
+  group_by(Bar, Racecourse) %>%
+  select(Bar, Racecourse, Date_format, est_daily_wins_B, est_daily_var, daily_runs, daily_wins) %>%
+  distinct() %>%
+  arrange(Bar,Racecourse,Date_format) %>%
+  mutate(date_to_apply = lead(Date_format,1),
+         est_wins = cumsum(est_daily_wins_B),
+         est_var = cumsum(est_daily_var),
+         est_sd = est_var^0.5,
+         total_runs = cumsum(daily_runs),
+         tot_wins = cumsum(daily_wins),
+         f_x_Bar = pnorm(tot_wins,est_wins,est_sd),
+         f_x_Bars = ifelse(total_runs<50,0.5,f_x_Bar),
+         f_x_Bar_adj = lag(f_x_Bars,1),
+         f_x_Bar_adj = ifelse(is.na(f_x_Bar_adj),0.5,f_x_Bar_adj),
+         bar_value = est_daily_wins_B*f_x_Bar_adj,
+         mean_est_wins_B = cummean(est_daily_wins_B),
+         mean_est_wins_B = lag(mean_est_wins_B,1),
+         race_est_wins_B = mean_est_wins_B/daily_runs
+         ) %>%
+  arrange(desc(Date_format), Bar, Racecourse) %>% 
+  select(Bar, Racecourse,Date_format, est_daily_wins_B, f_x_Bar_adj, bar_value, mean_est_wins_B, race_est_wins_B)
+
+df_6 <- df_5 %>%
+  distinct(Horse,Date_format,.keep_all = T) %>%
+  left_join(coefs, by = c("trackcondition")) %>%
+  left_join(speed_ratings, by = c("Horse","Date_format","distance")) %>%
+  left_join(Jockey_perception, by = c("Jockey","Date_format")) %>%
+  left_join(Jockey_Course_perception, by = c("Jockey","Racecourse","Date_format")) %>%
+  left_join(Trainer_Course_perception, by = c("Trainer","Racecourse","Date_format")) %>%
+  left_join(box_perception, by = c("Bar","Racecourse","Date_format")) %>%
+  group_by(Horse) %>%
+  mutate(alpha = 0.33,
+         weighted_margin = ifelse(valid_runs<6,
+                                  ifelse(is.na(lag(Margin_Metres,1)),
+                                         13.5,
+                                         lag(Margin_Metres,1)),
+                          (1-alpha)*lag(Margin_Metres,1)+
+                          ((1-alpha)^2)*lag(Margin_Metres,2)+
+                          ((1-alpha)^3)*lag(Margin_Metres,3)+
+                          ((1-alpha)^4)*lag(Margin_Metres,4)+
+                          ((1-alpha)^5)*lag(Margin_Metres,5)),
+         bar_coeficient = -0.005544*Bar) %>%
+  arrange(Horse, Date_format) %>%
+  mutate(#weighted_margin = lag(weighted_margin,1),
+         rest = as.numeric(Date_format - lag(Date_format,1)),
+         jockey_factor = as.factor(Jockey),
+         odds_var = (1/odds)*(1-(1/odds)),
+         odds_adj = (1/odds)+ (odds_var*rand_var)) %>%
+  group_by(RaceID) %>%
+  mutate(race_runners = n(),
+         sr_mean = mean(ewm_5, na.rm = T),
+         sr_edge = (ewm_5 - sr_mean)/(sr_mean)
+         ) %>%
+  ungroup()
+
+setwd("C:/Users/owenl/Documents/Owen/R_git/Horse_racing_analysis/sectional_positions")
+
+library(tidyverse)
+library(reactable)
+library(reshape2)
+library(glue)
+library(dplyr)
+library(caret)
+library(lubridate)
+
+df_sec <- list.files(pattern = ".rds") %>%
+  map(readRDS)
+
+
+df1_sec <- df_sec %>%
+  bind_rows %>%
+  unique()
+
+
+
+library(rvest)
+library(lubridate)
+library(glue)
+library(furrr)
+
+future::plan(multisession, workers = 4)
+
+base_url <- 'https://www.racingzone.com.au/results/'
+
+
+#getting required urls
+#base_url <- "https://www.racingaustralia.horse/FreeFields/Calendar_Results.aspx"
+
+date_list <- c(as.character(seq.Date(max(df1_sec$Date_format)+1,Sys.Date(), by = 1)))
+
+#date_list <- c(as.character(seq.Date(as.Date('2022-10-21'),as.Date('2022-11-21'), by = 1)))
+#creating blank list so i can get a url for race results for each state
+date_list_url <- c()
+
+#generating urls for each states racing results over the last month
+for (i in 1:length(date_list)) {
+  date_list_url[[i]] <- paste0(base_url,date_list[i],"/")
+}
+
+#generating a list of urls to run through to get all race data for last month
+results <- function(url_list){
+  paste0('https://www.racingzone.com.au',
+         read_html(url_list) %>%
+          html_nodes("a") %>%     
+          # find all links in the page
+          html_attr("href") %>%
+          unique() %>%
+          str_subset("/results/.+/\\d+-[:alpha:]+.")
+  )
+}
+
+#getting list of all urls with race data and converting to one list
+sec_results_url <- future_map(date_list_url, results,.progress = T) 
+
+sec_results_urls <- sec_results_url %>%
+  purrr::flatten()
+
+sec_results_urls <- sec_results_urls[!sec_results_urls %in% c("https://www.racingzone.com.au/results/","https://www.racingzone.com.au" )]
+
+Date_table <- c()
+
+for (i in 1:length(sec_results_url)){
+  for (n in 1:length(sec_results_url[[i]])){
+    Date_table[[i]] <- list(rep(date_list[i], each = n))
+  }
+}
+
+Date_tables <- Date_table %>%
+  purrr::flatten() %>%
+  purrr::flatten() 
+
+#creating function to extract all tables from each url 
+read_html_tbls <- function(url) {
+  html <- read_html(url) %>% 
+    html_nodes("table") %>% 
+    html_table()
+  
+  return(html)
+}
+
+
+#creating blank list for race tables to be appended to
+race_secs <- c()
+
+#appending all race tables
+race_secs <- future_map(sec_results_urls,read_html_tbls,.progress = T)
+
+race_sectionals <- c() 
+
+for (i in 1:length(race_secs)){
+  race_sectionals[[i]] <- as.data.frame(race_secs[[i]][1])
+  if (ncol(as.data.frame(race_secs[[i]][1]))==6){
+    race_sectionals[[i]] <- cbind(as.data.frame(race_secs[[i]][1]),
+                                  data.frame(matrix(nrow = nrow(as.data.frame(race_secs[[i]][1])), ncol = 6)))
+  }
+  colnames(race_sectionals[[i]]) <- c("Finish",
+                                      "Margin",
+                                      "Colours",
+                                      "Name",
+                                      "SP",
+                                      "Bar",
+                                      "Weight",
+                                      "Settle_pos",
+                                      "pos_1200m",
+                                      "pos_800m",
+                                      "pos_400m",
+                                      "Stewards_Comments")
+}
+
+#generating list of dates for each row in race sectionals
+Dates <- c()
+
+for (i in 1:length(race_sectionals)){
+  Dates[[i]] <- data.frame(c(rep(Date_tables[[i]], nrow(race_sectionals[[i]]))))
+}
+
+c1 <- do.call(rbind,race_sectionals)
+c2 <- do.call(rbind, Dates) 
+names(c2) <- "Date"
+
+c3 <- cbind(c1,c2)
+
+c4 <- c3 %>%
+  filter(!is.na(pos_400m)) %>%
+  mutate(trainer = str_split(Name,"-") %>% map_chr(., 2),
+         Horses= str_split(Name,"\\d[:alpha:]") %>% map_chr(.,1),
+         Horse= str_to_upper(gsub(" ","",Horses)),
+         Horse = gsub("\n","",Horse),
+         Horse = gsub("'","",Horse),
+         Horse = gsub("\\d+","",Horse),
+         Date_format = as.Date(Date),
+         Settle_pos = gsub("-",NA,Settle_pos)) %>%
+  select(Horse, Date_format, Bar, Settle_pos, pos_1200m, pos_800m, pos_400m)
+
+c3_A <- rbind(c4,df1_sec) %>%
+  unique()
+
+df_7 <- c3_A %>%
+  right_join(df_6, by = c("Horse","Date_format", "Bar")) %>%
+  as.data.frame() %>%
+  mutate(Settle_pos = as.numeric(Settle_pos),
+         Settle_pos = ifelse(is.na(Settle_pos),8,Settle_pos),
+         pos_1200m = as.numeric(pos_1200m),
+         pos_1200m = ifelse(is.na(pos_1200m),8,pos_1200m),
+         pos_800m = as.numeric(pos_800m),
+         pos_800m = ifelse(is.na(pos_800m),8,pos_800m),
+         pos_400m = as.numeric(pos_400m),
+         pos_400m = ifelse(is.na(pos_400m),8,pos_400m)) %>%
+  group_by(Horse) %>%
+  arrange(Horse, Date_format) %>%
+  mutate(mean_settle_pos = lag(cummean(Settle_pos),1),
+         min_settle_pos = lag(cummin(Settle_pos),1),
+         mean_pos_800m = lag(cummean(pos_800m),1),
+         mean_pos_1200m = lag(cummean(pos_1200m),1),
+         mean_pos_400m = lag(cummean(pos_400m),1),
+         min_pos_400m = lag(cummin(pos_400m),1),
+         prev_sp = lag(odds,1)
+         ) %>%
+  ungroup() %>%
+  mutate(min_settle_pos = ifelse(is.na(min_settle_pos),8,min_settle_pos),
+         mean_settle_pos = ifelse(is.na(mean_settle_pos),8,mean_settle_pos),
+         mean_pos_800m = ifelse(is.na(mean_pos_800m),8,mean_pos_800m),
+         mean_pos_1200m = ifelse(is.na(mean_pos_1200m),8,mean_pos_1200m),
+         mean_pos_400m = ifelse(is.na(mean_pos_400m),8,mean_pos_400m),
+         min_pos_400m = ifelse(is.na(min_pos_400m),8,min_pos_400m),
+         outcome = ifelse(Finish==1,1000,-1000/(odds-1)),
+         ln_sp_probs = log((1/odds)))
+
+
+horse_id <- df_7 %>%
+  group_by(Horse) %>%
+  select(Horse) %>%
+  distinct() %>%
+  ungroup() %>%
+  mutate(horse_ID = 1:n())
+
+df_7 <- df_7 %>% inner_join(horse_id, by = 'Horse')
+
+train <- df_7 %>% filter(Date_format <Sys.Date()-180,
+                         odds_adj<1,
+
+                         ) %>% select(-`Starting Price`,
+                                                                 -jockey_factor,
+                                                                 -Margin,
+                                                                 -Margin_Metres,
+                                                                 -ID
+                                                                ) 
+
+test <- df_7 %>% filter(Date_format >=Sys.Date()-180) %>% select(-`Starting Price`,
+                                                                 -jockey_factor,
+                                                                 -Margin,
+                                                                 -Margin_Metres,
+                                                                 -ID) 
+
+train_weights <- train$prob
+
+glm1_mod <- glm(winner ~ Bar+Horse_sr+ewm_5+f_x_Jockey_adj+f_x_Jockey_R_adj+f_x_Trainer_R_adj+f_x_Bar_adj+weighted_margin+rest+mean_settle_pos+mean_pos_400m+mean_est_wins_J+mean_est_wins_C+mean_est_wins_T+mean_est_wins_B+race_est_wins_J+race_est_wins_C+race_est_wins_T+race_est_wins_B + ln_sp_probs, family = binomial(link = 'logit'), data = train, weights = train_weights)
+
+
+
+library(xgboost)
+library(caret)
+t_pred <- predict(glm1_mod, train, type = 'response')
+xgb_train <- cbind(t_pred,train) %>%
+  dplyr::select(
+    winner,
+         Bar,
+         Horse_sr,
+         ewm_5,
+         f_x_Jockey_adj,
+         f_x_Jockey_R_adj,
+         f_x_Trainer_R_adj,
+         f_x_Bar_adj,
+         weighted_margin,
+         rest,
+        # mean_settle_pos,
+        # mean_pos_400m,
+    bar_coeficient,
+    mean_est_wins_J,
+    mean_est_wins_C,
+    mean_est_wins_T,
+    mean_est_wins_B,
+    race_est_wins_J,
+    race_est_wins_C,
+    race_est_wins_T,
+    race_est_wins_B,
+    t_pred,
+    ln_sp_probs
+         ) %>% 
+  as.matrix()
+
+t_pred <- predict(glm1_mod, test, type = 'response')
+xgb_test <- cbind(t_pred,test) %>%
+  select(
+    #Finish,
+    winner,
+         Bar,
+         Horse_sr,
+         ewm_5,
+         f_x_Jockey_adj,
+         f_x_Jockey_R_adj,
+         f_x_Trainer_R_adj,
+         f_x_Bar_adj,
+         weighted_margin,
+         rest,
+         #mean_settle_pos,
+         #mean_pos_400m,
+    bar_coeficient,
+        mean_est_wins_J,
+    mean_est_wins_C,
+    mean_est_wins_T,
+    mean_est_wins_B,
+    race_est_wins_J,
+    race_est_wins_C,
+    race_est_wins_T,
+    race_est_wins_B,
+    t_pred,
+    ln_sp_probs
+         ) %>% 
+  as.matrix()
+
+m1_xgb_1 <-
+  xgboost(
+    data = xgb_train[, 2:21],
+    label = xgb_train[, 1],
+    nrounds = 2000,
+    objective = "binary:logistic", #"reg:squarederror"
+    early_stopping_rounds = 3,
+    max_depth = 8,
+    eta = .25
+  )
+
+pred_xgb <- predict(m1_xgb_1, xgb_test[, 2:21], type = 'response')
+
+xgb_res_win <- cbind(pred_xgb, t_pred,test)%>%
+  group_by(RaceID)%>%
+  mutate(sum_xgb = sum(pred_xgb),
+         pred_prob = pred_xgb/sum_xgb,
+         cash_ind = ifelse(pred_prob >((1/odds)+0.15),1,0),
+         value_ind = ifelse(pred_prob >((1/odds)),1,0),
+         pred_ind = ifelse(pred_xgb >((1/odds)+0.1),1,0),
+         value_diff = plyr::round_any((1/odds)-pred_prob,0.05, ceiling),
+         t_pred_diff = plyr::round_any((1/odds)-t_pred,0.05, ceiling), 
+         t_pred_ind = ifelse(t_pred>((1/odds)),1,0),
+         bet_price = 1/(pred_xgb),
+         pred_fav = ifelse(max(pred_prob)==pred_prob,1,0),
+         race_fav = ifelse(odds ==min(odds),1,0),
+         bet = (1000/(odds-1)),
+         outcome = ifelse(Finish==1,1000,bet*-1)) %>%
+  relocate(cash_ind,
+           bet_price,
+           pred_prob,
+           RaceID,
+           pred_fav,
+           race_fav,
+           bet,
+           outcome,
+           bar_value,
+           value_diff,
+           t_pred,
+           t_pred_ind)
+
+
+res_win_sum <- xgb_res_win %>%
+  ungroup() %>%
+   filter(
+        #pred_fav ==1,
+        Finish != 0,
+        #pred_prob >0.9,
+        pred_xgb > 0.75,
+        #pred_ind ==1,
+        rest>0,
+        #odds>2.5,
+         ) %>%
+  group_by(
+    #t_pred_ind,
+    #value_ind,
+    plyr::round_any(t_pred,0.05,ceiling),
+    #plyr::round_any(t_pred,0.05,ceiling),
+    ) %>%
+  summarise(n(),
+            sum(winner),
+            win_perc= sum(winner)/n(),
+            outlay = sum(bet),
+            result = sum(outcome),
+            margin = result/outlay)
+
+
+```
+
+
+
+```{r prediction refresh}
+marketCat <- listMarketCatalogue(eventTypeIds = "7", marketCountries = "AU", marketTypeCodes = "WIN", toDate = (format(Sys.time() + 86400 * 5, "%Y-%m-%dT%TZ"))) %>%
+  filter(grepl("*Trot", marketName)==F,
+         grepl("*Pace*", marketName)==F)
+
+marketPlace <- listMarketCatalogue(eventTypeIds = "7", marketCountries = "AU", marketTypeCodes = "PLACE", toDate = (format(Sys.time() + 86400 * 5, "%Y-%m-%dT%TZ"))) %>%
+  filter(grepl("*Trot", marketName)==F,
+         grepl("*Pace*", marketName)==F)
+
+market_id <- marketCat$marketId 
+
+length(marketCat$marketId)
+
+odds <- c()
+odds_runners <- c()
+for (i in 1:length(marketCat$marketId)){
+
+odds[[i]] <- abettor::listMarketBook(marketIds = market_id[[i]],
+                                priceData = "EX_BEST_OFFERS",
+                                bestPricesDepth = 0) 
+
+odds_runners[[i]] <- as.data.frame(odds[[i]][["runners"]]) %>%
+  unnest(ex) %>%
+  unnest(availableToBack) %>%
+  dplyr::select(selectionId,
+         status,
+         price)
+
+}
+
+#odds_sp <- c()
+#odds_runners_sp <- c()
+#for (i in 1:length(marketCat$marketId)){
+#
+#odds_sp[[i]] <- abettor::listMarketBook(marketIds = market_id[[i]],
+#                                priceData = "SP_AVAILABLE",
+#                                bestPricesDepth = 1) 
+#
+#odds_runners_sp[[i]] <- as.data.frame(odds_sp[[i]][["runners"]]) %>%
+#  unnest(sp) %>%
+#  #unnest(backStakeTaken) %>%
+#  dplyr::select(selectionId,
+#                status,
+#               lastPriceTraded
+#                ) %>%
+#  mutate(price = lastPriceTraded)%>%
+#  as.data.frame()
+##
+#}
+
+
+races <- c()
+for (i in 1:length(market_id)) {
+  races[[i]] <- as.data.frame(marketCat$runners[[i]]) %>%
+    unnest(metadata) %>%
+    mutate(race_info = paste0(marketCat$marketName[[i]],",", marketCat$event$venue[[i]]))
+  names(races)[[i]] <- paste0(marketCat$marketName[[i]],",", marketCat$event$venue[[i]])
+}
+
+
+
+Horse_odds <- do.call("rbind", odds_runners) %>%
+  na.omit()
+Horse_race <- do.call("rbind", races)  
+#Horse_odds_sp <- do.call("rbind", odds_runners_sp) %>%
+#  na.omit()
+
+
+runners_horse <- Horse_odds %>%
+  inner_join(Horse_race, by = c("selectionId")) %>%
+  group_by(selectionId, race_info) %>%
+  mutate(fluc = 1:n(),
+         avg_price = mean(price)) %>%
+  filter(fluc == min(fluc)) %>%
+  mutate(Horse = str_to_upper(runnerName),
+         Horse = gsub("\\d+\\.","",Horse),
+         Horse = gsub(" ","",Horse),
+         No = as.numeric(CLOTH_NUMBER_ALPHA),
+         Jockey = gsub("[^[:alpha:] ]", "", JOCKEY_NAME),
+         Jockey = gsub(" ", "", Jockey),
+         Trainer = gsub("[^[:alpha:] ]", "", JOCKEY_NAME),
+         Trainer = gsub(" ", "", Jockey),
+         odds = price,
+         STALL_DRAW = as.numeric(STALL_DRAW)) %>%
+  ungroup() %>%
+  dplyr::select(Horse,
+         odds,
+         STALL_DRAW,
+         No)
+
+runners_with_odds <- inner_join(runners_horse,race_tomorrow_combined_test, by = c("Horse" = "Horse")) %>%
+  dplyr::select(-`Probable Weight`,
+                -Penalty,
+                -`Hcp Rating`) %>%
+  mutate(Jockey = ifelse(Jockey=="", NA,Jockey))%>%
+  mutate(Bar = Barrier) %>%
+  na.omit()
+
+todays_runs <- runners_with_odds %>%
+  transmute(Finish = 0,No. = No.x,Horse,Trainer,Jockey,Margin = NA,Bar.  = STALL_DRAW,Weight,`Starting Price` = odds,character,race_info,info,odds,Date_format,State,Racecourse,Race,Day_of_week,distance, track_condition,winning_time = NA)
+
+
+df_1 <- rbind(df1, race_results_combined, todays_runs)
+
+# creating time function to approximate a finish time for all horses, not just winning horses
+time_function <- function(dataset){
+  dataset$winning_time_sec<- as.numeric(gsub(":","",str_extract(dataset$winning_time,":\\d+.\\d+")))
+  
+  dataset$winning_time_min <- as.numeric(str_extract(dataset$winning_time,"\\d+"))*60
+  dataset$winning_time_total <- dataset$winning_time_min+dataset$winning_time_sec
+  dataset$Margin <- gsub("L","",dataset$Margin) 
+  ## using the assumption that a horse length is roughly 2.5 metres
+  dataset$Margin_Metres <- as.numeric(dataset$Margin)*2.5
+  dataset$winner_MperSec <- dataset$distance/dataset$winning_time_total
+  
+  dataset$time <- dataset$winning_time_total+
+    ifelse(is.na(dataset$Margin_Metres/dataset$winner_MperSec),
+           0,
+           dataset$Margin_Metres/dataset$winner_MperSec)
+  return(dataset)
+}
+
+df2 <- time_function(df_1)
+
+df3 <- df2 %>%
+  dplyr::select(-winning_time,
+         -winning_time_sec,
+         -winning_time_min,
+         -winning_time_total,
+         -winner_MperSec) %>%
+  dplyr::mutate(RaceID = paste(info,",",Race),
+         ID = paste(info,",",Race,"Finish-", Finish),
+         Margin_Metres = ifelse(is.na(Margin_Metres)==T, 0, Margin_Metres),
+         winner = ifelse(Finish==1,1,0),
+         track_condition = gsub('[^[:digit:]]{,2}$','',track_condition),
+         Weight = ifelse(is.na(Weight),0,Weight),
+         Race_time = str_extract(race_info,"\\d+:\\d+[AP]M"),
+         Datetime = as.POSIXct(paste(Date_format, " ", Race_time), format = "%Y-%m-%d %I:%M%p"),
+         #track_condition = as.factor(as.character(str_extract_all(df2$character,"Track Condition: .* T"))),
+         track_condition = gsub(" Ti","", track_condition),
+         Datetime = ifelse(State=="WA",
+                           Datetime+dhours(2),
+                           ifelse(State %in% c("SA","NT"),
+                                  Datetime+dhours(1.5),
+                                  Datetime)),
+         Race_time = format(Datetime, format = "%I:%M%p")) %>%
+  filter(#time >0,
+         is.na(Finish)!=T,
+         track_condition!="character(0",
+         is.na(distance)==F) %>%
+  arrange(Datetime,RaceID, Finish) %>%
+  dplyr::mutate(Bar = Bar.,
+         Horse = gsub("*\\(.{1+}\\)$","", Horse),
+         Horse = gsub(" {1+}","",Horse),
+         Horse = gsub("[^[:alpha:] ]", "", Horse),
+         Jockey = gsub(" {1+}","",Jockey),
+         Jockey = gsub("[^[:alpha:] ]", "", Jockey),
+         Jockey = gsub("*\\(.{1+}\\)", "", Jockey),
+         Jockey = gsub("latealt$","",Jockey),
+         Jockey = gsub("kg$","",Jockey),
+         Trainer = gsub(" {1+}","",Trainer),
+         Trainer = gsub("[^[:alpha:] ]", "", Trainer),
+         track_condition = gsub(" {1+}","",track_condition),
+         track_condition = gsub("\\_{1+}","",track_condition),
+         trackcondition = gsub(":{1+}","",track_condition),
+         Lengths = ifelse(is.na(as.numeric(Margin)),0,as.numeric(Margin)),
+         adj_dist = plyr::round_any(distance,50),
+         prob = 1/odds
+         ) %>%
+  filter(!is.na(odds)) #%>%
+  #dplyr::mutate(win_prize = as.numeric(gsub(" 2nd ","",
+  #                                   gsub(",","",str_split(character, "\\$") %>% map_chr(., 3)))),
+  #       prize_pool = as.numeric(gsub(".1st ","",
+  #                                    gsub(",","",str_split(character, "\\$") %>% map_chr(., 2))))) %>%
+  #unique()
+
+#df4 <- df2 %>%
+#  dplyr::select(-winning_time,
+#         -winning_time_sec,
+#         -winning_time_min,
+#         -winning_time_total,
+#         -winner_MperSec) %>%
+#  mutate(RaceID = paste(info,",",Race),
+#         ID = paste(info,",",Race,"Finish-", Finish),
+#         Margin_Metres = ifelse(is.na(Margin_Metres)==T, 0, Margin_Metres),
+#         winner = ifelse(Finish==1,1,0),
+#         track_condition = gsub('.{2}$','',track_condition),
+#         Weight = ifelse(is.na(Weight),0,Weight),
+#         Race_time = str_extract(race_info,"\\d+:\\d+[AP]M"),
+#         Datetime = as.POSIXct(paste(Date_format, " ", Race_time), format = "%Y-%m-%d %I:%M%p"),
+#         track_condition = as.factor(as.character(str_extract_all(df2$character,"Track Condition: .* #Time:"))),
+#         track_condition = gsub("Time:","", track_condition),
+#         Datetime = ifelse(State=="WA",
+#                           Datetime+dhours(2),
+#                           ifelse(State %in% c("SA","NT"),
+#                                  Datetime+dhours(1.5),
+#                                  Datetime)),
+#         Race_time = format(Datetime, format = "%I:%M%p")) %>%
+#  filter(#time >0,
+#         is.na(Finish)!=T,
+#         track_condition!="character(",
+#         is.na(distance)==F) %>%
+#  arrange(Datetime,RaceID, Finish) %>%
+#  mutate(Bar = Bar.,
+#         Horse = gsub("*\\(.{1+}\\)$","", Horse),
+#         Horse = gsub(" {1+}","",Horse),
+#         Horse = gsub("[^[:alpha:] ]", "", Horse),
+#         Jockey = gsub(" {1+}","",Jockey),
+#         Jockey = gsub("[^[:alpha:] ]", "", Jockey),
+#         Jockey = gsub("*\\(.{1+}\\)", "", Jockey),
+#         Jockey = gsub("kg$","",Jockey),
+#         Trainer = gsub(" {1+}","",Trainer),
+#         Trainer = gsub("[^[:alpha:] ]", "", Trainer),
+#         track_condition = gsub(" {1+}","",track_condition),
+#         track_condition = gsub("\\_{1+}","",track_condition),
+#         trackcondition = gsub(":{1+}","",track_condition)
+#         ) %>%
+#  unique() 
+
+track_pars <- df3 %>% 
+  #filter(Date_format<'2022-10-01') %>% 
+  group_by(Racecourse, Date_format, distance) %>%
+  mutate(daily_par_time = mean(time, na.rm=T),
+         runs = n()) %>%
+  summarise(Racecourse, Date_format, distance, daily_par_time, runs) %>% 
+  unique() %>%
+  arrange(Racecourse, distance, Date_format) %>%
+  group_by(Racecourse, distance) %>%
+  mutate(med_par_time =cummean(daily_par_time),
+         tot_runs = cumsum(runs),
+         pred_par_time = med_par_time,
+         date_to_apply = lead(Date_format,1)
+         ) %>%
+  dplyr::select(Racecourse, distance, date_to_apply,tot_runs, pred_par_time) %>%
+  ungroup()
+
+distance_pars <- df3 %>% 
+  #filter(Date_format<'2022-10-01') %>% 
+  group_by(adj_dist, trackcondition) %>%
+  mutate(avg_dist_time = median(time, na.rm =T)) %>%
+  summarise(Date_format, adj_dist, trackcondition, avg_dist_time) %>% unique()
+
+dff <- left_join(df3 #%>% filter(Date_format<'2022-10-01'),
+                 , track_pars, by = c("Racecourse", "Date_format" = "date_to_apply", "distance")) %>%
+  left_join(distance_pars, by = c("Date_format", "adj_dist", "trackcondition")) %>%
+  group_by(adj_dist,Horse) %>%
+  mutate(sr = round((pred_par_time/time)*100,2),
+         dist_sr = round((avg_dist_time/time)*100,2),
+         mean_sr = mean(sr),
+         mean_dist_sr = mean(dist_sr),
+         track_dif = round((pred_par_time-time),2),
+         mean_track_dif = mean(track_dif))
+
+horse_sr_Ratings <- dff %>% 
+  dplyr::select(adj_dist,Horse, mean_sr, mean_dist_sr, mean_track_dif) %>% unique()
+
+df_5 <- left_join(df3, track_pars, by = c("Date_format" = "date_to_apply","Racecourse","distance")) %>%
+  #filter(!is.na(time)) %>%
+  unique() %>%
+  distinct(Horse,RaceID, .keep_all = T) %>%
+  ungroup() %>%
+  mutate(rand_var = rnorm(nrow(.),0,0.05)) %>%
+  group_by(RaceID) %>%
+  mutate(rand_odds = prob+abs(rand_var),
+         rand_odds_sum = sum(rand_odds),
+         prob_adj = rand_odds/rand_odds_sum,
+         odds_adj = 1/prob_adj) %>%
+  ungroup() %>%
+  filter(odds>=1)
+#%>% mutate(pred_par_time = ifelse(is.na(pred_par_time), time, pred_par_time),)
+
+lm1 <- lm(time ~ pred_par_time + trackcondition, data = df_5 %>% filter(Date_format != max(Date_format)))
+coefs<- as.data.frame(lm1$coefficients)
+coefs <- coefs %>%
+  mutate(trackcondition = gsub("trackcondition","",row.names(.)),
+         track_coeficient = `lm1$coefficients`) %>%
+  dplyr::select(track_coeficient, trackcondition)
+
+lm2 <- lm(time ~ pred_par_time + Bar, data = df_5)
+#coef2 <- as.data.frame(lm2$coefficients)
+
+
+speed_ratings <- df_5 %>%
+  filter(time>0|is.na(time),
+         pred_par_time>0) %>%
+  mutate(sr = as.numeric(round((pred_par_time/time)*100,3)),
+         valid_run = ifelse(is.na(sr),
+                            0,
+                            1),
+         sr = ifelse(is.na(sr),
+                     round((mean(sr, na.rm = T)-sd(sr, na.rm = T)*3),3),
+                     sr)) %>%
+  group_by(Horse) %>%
+  arrange(Horse, Date_format) %>%
+  distinct(Horse, Date_format, .keep_all = T) %>%
+  mutate(Horse_runs = 1:n(),
+         valid_runs = lag(cumsum(valid_run),1),
+         Horse_sr = lag(cummean(sr),1),
+         alpha = 0.5,
+         ewm_5 = ifelse(valid_runs<6,
+                        Horse_sr,
+                          (1-alpha)*lag(sr,1)+
+                          ((1-alpha)^2)*lag(sr,2)+
+                          ((1-alpha)^3)*lag(sr,3)+
+                          ((1-alpha)^4)*lag(sr,4)+
+                          ((1-alpha)^5)*lag(sr,5))) %>%
+  dplyr::select(Horse,Date_format, distance,Horse_sr,valid_runs,ewm_5) %>% ungroup()
+
+Jockey_perception <- df_5 %>%
+  select(Jockey, Racecourse, prob, RaceID, Date_format, winner) %>%
+  group_by(RaceID) %>%
+  mutate(race_tot_odds = sum(prob),
+         adj_prob = prob/race_tot_odds,
+         adj_var = adj_prob*(1-adj_prob),
+         runs = 1,
+         Jockey = gsub("latealt$","",Jockey)) %>%
+  group_by(Jockey, Racecourse, Date_format) %>%
+  mutate(est_daily_wins_J = sum(prob, na.rm = T),
+         est_daily_var = sum(adj_var, na.rm = T),
+         daily_runs = sum(runs, na.rm = T),
+         daily_wins = sum(winner, na.rm = T)) %>%
+  group_by(Jockey) %>%
+  select(Jockey, Racecourse, Date_format, est_daily_wins_J, est_daily_var, daily_runs, daily_wins) %>%
+  distinct() %>%
+  arrange(Jockey,Date_format) %>%
+  mutate(date_to_apply = lead(Date_format,1),
+         est_wins = cumsum(est_daily_wins_J),
+         est_var = cumsum(est_daily_var),
+         est_sd = est_var^0.5,
+         total_runs = cumsum(daily_runs),
+         tot_wins = cumsum(daily_wins),
+         f_x_Jockey = pnorm(tot_wins,est_wins,est_sd),
+         f_x_Jockeys = ifelse(total_runs<50,0.5,f_x_Jockey),
+         f_x_Jockey_adj = lag(f_x_Jockeys,1),
+         f_x_Jockey_adj = ifelse(is.na(f_x_Jockey_adj),
+                                 0.5,
+                                 f_x_Jockey_adj),
+         Jockey_value = est_daily_wins_J*f_x_Jockey_adj,
+         mean_est_wins_J = cummean(est_daily_wins_J),
+         mean_est_wins_J = lag(mean_est_wins_J,1),
+         race_est_wins_J = mean_est_wins_J/daily_runs) %>%
+  arrange(desc(Date_format), Jockey, Racecourse) %>% 
+  select(Jockey, Date_format, est_daily_wins_J,f_x_Jockey_adj, Jockey_value, mean_est_wins_J, race_est_wins_J)
+
+Jockey_Course_perception <- df_5 %>%
+  select(Jockey, Racecourse, odds, prob, RaceID, Date_format, winner) %>%
+  group_by(RaceID) %>%
+  mutate(race_tot_odds = sum(prob),
+         adj_prob = (prob)/race_tot_odds,
+         adj_var = adj_prob*(1-adj_prob),
+         runs = 1) %>%
+  group_by(Jockey, Racecourse, Date_format) %>%
+  mutate(est_daily_wins_C = sum((1/odds), na.rm = T),
+         est_daily_var = sum(adj_var, na.rm = T),
+         daily_runs = sum(runs, na.rm = T),
+         daily_wins = sum(winner, na.rm = T)) %>%
+  group_by(Jockey, Racecourse) %>%
+  select(Jockey, Racecourse, Date_format, est_daily_wins_C, est_daily_var, daily_runs, daily_wins) %>%
+  distinct() %>%
+  arrange(Jockey,Date_format) %>%
+  mutate(date_to_apply = lead(Date_format,1),
+         est_wins = cumsum(est_daily_wins_C),
+         est_var = cumsum(est_daily_var),
+         est_sd = est_var^0.5,
+         total_runs = cumsum(daily_runs),
+         tot_wins = cumsum(daily_wins),
+         f_x_Jockey_R = pnorm(tot_wins,est_wins,est_sd),
+         f_x_Jockey_Rs = ifelse(total_runs<50,0.5,f_x_Jockey_R),
+         f_x_Jockey_R_adj = lag(f_x_Jockey_Rs,1),
+         f_x_Jockey_R_adj = ifelse(is.na(f_x_Jockey_R_adj),0.5,f_x_Jockey_R_adj),
+         jockey_course_value = est_daily_wins_C*f_x_Jockey_R_adj,
+         mean_est_wins_C = cummean(est_daily_wins_C),
+         mean_est_wins_C = lag(mean_est_wins_C,1),
+         race_est_wins_C = mean_est_wins_C/daily_runs) %>%
+  arrange(desc(Date_format), Jockey, Racecourse) %>% 
+  select(Jockey, Racecourse,Date_format, est_daily_wins_C, f_x_Jockey_R_adj, jockey_course_value, mean_est_wins_C, race_est_wins_C)
+
+
+Trainer_Course_perception <- df_5 %>%
+  select(Trainer, Racecourse, prob, odds, RaceID, Date_format, winner) %>%
+  group_by(RaceID) %>%
+  mutate(race_tot_odds = sum(prob),
+         adj_prob = (prob)/race_tot_odds,
+         adj_var = adj_prob*(1-adj_prob),
+         runs = 1) %>%
+  group_by(Trainer, Racecourse, Date_format) %>%
+  mutate(est_daily_wins_T = sum((1/odds), na.rm = T),
+         est_daily_var = sum(adj_var, na.rm = T),
+         daily_runs = sum(runs, na.rm = T),
+         daily_wins = sum(winner, na.rm = T)) %>%
+  group_by(Trainer, Racecourse) %>%
+  select(Trainer, Racecourse, Date_format, est_daily_wins_T, est_daily_var, daily_runs, daily_wins) %>%
+  distinct() %>%
+  arrange(Trainer,Date_format) %>%
+  mutate(date_to_apply = lead(Date_format,1),
+         est_wins = cumsum(est_daily_wins_T),
+         est_var = cumsum(est_daily_var),
+         est_sd = est_var^0.5,
+         total_runs = cumsum(daily_runs),
+         tot_wins = cumsum(daily_wins),
+         f_x_Trainer_R = pnorm(tot_wins,est_wins,est_sd),
+         f_x_Trainer_Rs = ifelse(total_runs<50,0.5,f_x_Trainer_R),
+         f_x_Trainer_R_adj = lag(f_x_Trainer_Rs, 1),
+         f_x_Trainer_R_adj = ifelse(is.na(f_x_Trainer_R_adj),0.5,f_x_Trainer_R_adj),
+         trainer_course_value = est_daily_wins_T*f_x_Trainer_R_adj,
+         mean_est_wins_T = cummean(est_daily_wins_T),
+         mean_est_wins_T = lag(mean_est_wins_T,1),
+         race_est_wins_T = mean_est_wins_T/daily_runs
+         ) %>%
+  arrange(desc(Date_format), Trainer, Racecourse) %>% 
+  select(Trainer, Racecourse,Date_format, est_daily_wins_T, f_x_Trainer_R_adj, trainer_course_value, mean_est_wins_T, race_est_wins_T)
+
+box_perception <- df_5 %>%
+  select(Bar, Racecourse, odds,prob, RaceID, Date_format, winner) %>%
+  group_by(RaceID) %>%
+  mutate(race_tot_odds = sum(prob),
+         adj_prob = prob/race_tot_odds,
+         adj_var = adj_prob*(1-adj_prob),
+         runs = 1) %>%
+  group_by(Bar, Racecourse, Date_format) %>%
+  mutate(est_daily_wins_B = sum(1/odds, na.rm = T),
+         est_daily_var = sum(adj_var, na.rm = T),
+         daily_runs = sum(runs, na.rm = T),
+         daily_wins = sum(winner, na.rm = T)) %>%
+  group_by(Bar, Racecourse) %>%
+  select(Bar, Racecourse, Date_format, est_daily_wins_B, est_daily_var, daily_runs, daily_wins) %>%
+  distinct() %>%
+  arrange(Bar,Racecourse,Date_format) %>%
+  mutate(date_to_apply = lead(Date_format,1),
+         est_wins = cumsum(est_daily_wins_B),
+         est_var = cumsum(est_daily_var),
+         est_sd = est_var^0.5,
+         total_runs = cumsum(daily_runs),
+         tot_wins = cumsum(daily_wins),
+         f_x_Bar = pnorm(tot_wins,est_wins,est_sd),
+         f_x_Bars = ifelse(total_runs<50,0.5,f_x_Bar),
+         f_x_Bar_adj = lag(f_x_Bars,1),
+         f_x_Bar_adj = ifelse(is.na(f_x_Bar_adj),0.5,f_x_Bar_adj),
+         bar_value = est_daily_wins_B*f_x_Bar_adj,
+         mean_est_wins_B = cummean(est_daily_wins_B),
+         mean_est_wins_B = lag(mean_est_wins_B,1),
+         race_est_wins_B = mean_est_wins_B/daily_runs
+         ) %>%
+  arrange(desc(Date_format), Bar, Racecourse) %>% 
+  select(Bar, Racecourse,Date_format, est_daily_wins_B, f_x_Bar_adj, bar_value, mean_est_wins_B, race_est_wins_B)
+
+df_6 <- df_5 %>%
+  distinct(Horse,Date_format,.keep_all = T) %>%
+  left_join(coefs, by = c("trackcondition")) %>%
+  left_join(speed_ratings, by = c("Horse","Date_format","distance")) %>%
+  left_join(Jockey_perception, by = c("Jockey","Date_format")) %>%
+  left_join(Jockey_Course_perception, by = c("Jockey","Racecourse","Date_format")) %>%
+  left_join(Trainer_Course_perception, by = c("Trainer","Racecourse","Date_format")) %>%
+  left_join(box_perception, by = c("Bar","Racecourse","Date_format")) %>%
+  group_by(Horse) %>%
+  mutate(alpha = 0.33,
+         weighted_margin = ifelse(valid_runs<6,
+                                  ifelse(is.na(lag(Margin_Metres,1)),
+                                         13.5,
+                                         lag(Margin_Metres,1)),
+                          (1-alpha)*lag(Margin_Metres,1)+
+                          ((1-alpha)^2)*lag(Margin_Metres,2)+
+                          ((1-alpha)^3)*lag(Margin_Metres,3)+
+                          ((1-alpha)^4)*lag(Margin_Metres,4)+
+                          ((1-alpha)^5)*lag(Margin_Metres,5)),
+         bar_coeficient = -0.005544*Bar) %>%
+  arrange(Horse, Date_format) %>%
+  mutate(#weighted_margin = lag(weighted_margin,1),
+         rest = as.numeric(Date_format - lag(Date_format,1)),
+         jockey_factor = as.factor(Jockey),
+         odds_var = (1/odds)*(1-(1/odds)),
+         odds_adj = (1/odds)+ (odds_var*rand_var)) %>%
+  ungroup()
+
+df_7 <- c3_A %>%
+  right_join(df_6, by = c("Horse","Date_format", "Bar")) %>%
+  as.data.frame() %>%
+  #group_by(RaceID) %>%
+  mutate(Settle_pos = as.numeric(Settle_pos),
+         Settle_pos = ifelse(is.na(Settle_pos),8,Settle_pos),
+         pos_1200m = as.numeric(pos_1200m),
+         pos_1200m = ifelse(is.na(pos_1200m),8,pos_1200m),
+         pos_800m = as.numeric(pos_800m),
+         pos_800m = ifelse(is.na(pos_800m),8,pos_800m),
+         pos_400m = as.numeric(pos_400m),
+         pos_400m = ifelse(is.na(pos_400m),8,pos_400m)) %>%
+  group_by(Horse) %>%
+  arrange(Horse, Date_format) %>%
+  mutate(mean_settle_pos = lag(cummean(Settle_pos),1),
+         min_settle_pos = lag(cummin(Settle_pos),1),
+         mean_pos_800m = lag(cummean(pos_800m),1),
+         mean_pos_1200m = lag(cummean(pos_1200m),1),
+         mean_pos_400m = lag(cummean(pos_400m),1),
+         min_pos_400m = lag(cummin(pos_400m),1),
+         prev_sp = lag(odds,1)
+         #med_pos_400m = ifelse(is.na(mean_pos_400m), 8,med_pos_400m)
+         #f_x_Jockey_adj = ifelse(is.na(f_x_Jockey_adj),0.5,f_x_Jockey_adj),
+         #f_x_Bar_adj = ifelse(is.na(f_x_Bar_adj),0.5,f_x_Bar_adj)
+         ) %>%
+  ungroup() %>%
+  mutate(min_settle_pos = ifelse(is.na(min_settle_pos),8,min_settle_pos),
+         mean_settle_pos = ifelse(is.na(mean_settle_pos),8,mean_settle_pos),
+         mean_pos_800m = ifelse(is.na(mean_pos_800m),8,mean_pos_800m),
+         mean_pos_1200m = ifelse(is.na(mean_pos_1200m),8,mean_pos_1200m),
+         mean_pos_400m = ifelse(is.na(mean_pos_400m),8,mean_pos_400m),
+         min_pos_400m = ifelse(is.na(min_pos_400m),8,min_pos_400m),
+         ln_sp_probs = log((1/odds)))
+
+#library(nnet)
+#lead_400_glm <- multinom(Settle_pos ~ Bar + No. + Jockey+ Weight, df_7)
+
+horse_id <- df_7 %>%
+  group_by(Horse) %>%
+  select(Horse) %>%
+  distinct() %>%
+  ungroup() %>%
+  mutate(horse_ID = 1:n())
+
+df_7 <- df_7 %>% inner_join(horse_id, by = 'Horse') 
+
+test_t <- df_7 %>% filter(Date_format >=Sys.Date()) %>% select(-`Starting Price`,
+                                                                 -jockey_factor,
+                                                                 -Racecourse,
+                                                                 -Margin,
+                                                                 -Margin_Metres,
+                                                                 -ID)  
+  #mutate(Finish = as.factor(Finish))
+ # mutate(winner = as.factor(winner))
+t_pred <- predict(glm1_mod, test_t, type = 'response')
+xgb_test_t <- cbind(test_t, t_pred) %>%
+  select(
+    #Finish,
+    winner,
+         Bar,
+         Horse_sr,
+         ewm_5,
+         f_x_Jockey_adj,
+         f_x_Jockey_R_adj,
+         f_x_Trainer_R_adj,
+         f_x_Bar_adj,
+         weighted_margin,
+         rest,
+         #mean_settle_pos,
+         #mean_pos_400m,
+    bar_coeficient,
+    mean_est_wins_J,
+    mean_est_wins_C,
+    mean_est_wins_T,
+    mean_est_wins_B,
+    race_est_wins_J,
+    race_est_wins_C,
+    race_est_wins_T,
+    race_est_wins_B,
+    t_pred,
+    ln_sp_probs
+         #odds_adj
+         ) %>% 
+  as.matrix()
+
+#m1_xgb_1 <-
+#  xgboost(
+#    data = xgb_train[, 2:12],
+#    label = xgb_train[, 1],
+#    nrounds = 1000,
+#    objective = "binary:logistic", #"reg:squarederror"
+#    early_stopping_rounds = 3,
+#    max_depth = 6,
+#    eta = .25
+#  )
+
+pred_xgb <- predict(m1_xgb_1, xgb_test_t[, 2:21])
+
+xgb_res_win_today <- cbind(pred_xgb,t_pred, test_t )%>%
+  group_by(RaceID)%>%
+  mutate(sum_xgb = sum(pred_xgb),
+         pred_prob = pred_xgb/sum_xgb,
+         cash_ind = ifelse(pred_xgb >((1/odds)+0.15),1,0),
+         bet_price = 1/(pred_xgb),
+         pred_fav = ifelse(max(pred_xgb)==pred_xgb,1,0),
+         race_fav = ifelse(odds ==min(odds),1,0),
+         bet = (1000/(odds-1)),
+         outcome = ifelse(Finish==1,1000,bet*-1),
+         t_pred_value = ifelse(t_pred>(1/odds),1,0)) %>%
+  relocate(cash_ind,
+           bet_price,
+           pred_prob,
+           RaceID,
+           No.,
+           t_pred,
+           pred_xgb,
+           pred_fav,
+           race_fav,
+           bet,
+           outcome,
+           Jockey_value,
+           jockey_course_value,
+           trainer_course_value,
+           bar_value) %>%
+  filter(Finish ==0,
+         #f_x_Jockey_R_adj>0.5,
+         #f_x_Bar_adj>0.5
+         #pred_xgb>0.65
+         ) %>%
+  arrange(desc(pred_xgb))
+
+
+
+```
+

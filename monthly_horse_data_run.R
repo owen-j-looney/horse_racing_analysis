@@ -150,7 +150,7 @@ trial_results_combined <- do.call("rbind", filtered_trial_results_list)
 #cleaning some data and extracting some information into columns for both race and trial data
 race_results_combined <- race_results_combined %>%
   dplyr::select(-Colour,
-         -Penalty) %>%
+                -Penalty) %>%
   mutate(Finish = as.numeric(Finish),
          odds = as.numeric(gsub(".*?([0-9.]+).*", "\\1",`Starting Price`)),
          Weight = as.numeric(gsub("kg.*","", Weight)),
@@ -164,7 +164,7 @@ race_results_combined <- race_results_combined %>%
          track_condition = as.factor(as.character(str_extract_all(race_results_combined$character,"Track Condition: .* Time:"))),
          distance = as.numeric(str_replace_all(distance, c("\\(" = "", "METRES\\)" = ""))),
          winning_time = gsub("Time: ","",str_extract_all(character,"Time: \\d+:\\d+.\\d+ "))
-         ) %>%
+  ) %>%
   na.omit() 
 
 saveRDS(race_results_combined, glue("C:/Users/owenl/Documents/Owen/R_git/Horse_racing_analysis/Race_results_last_month_{Sys.Date()}.rds"))
@@ -173,7 +173,7 @@ saveRDS(race_results_combined, glue("C:/Users/owenl/Documents/Owen/R_git/Horse_r
 
 trial_results_combined <- trial_results_combined %>%
   dplyr::select(-Colour,
-         -Penalty) %>%
+                -Penalty) %>%
   mutate(Finish = as.numeric(Finish),
          odds = as.numeric(gsub(".*?([0-9.]+).*", "\\1",`Starting Price`)),
          Weight = as.numeric(gsub("kg.*","", Weight)),
@@ -196,266 +196,146 @@ saveRDS(trial_results_combined, glue("C:/Users/owenl/Documents/Owen/R_git/Horse_
 ##### End of script run to pull and clean race data into useable format
 #### more can be done like converting dates etc.
 
+setwd("C:/Users/owenl/Documents/Owen/R_git/Horse_racing_analysis/sectional_positions")
 
-train_index <- createDataPartition(race_results_combined$info, p=0.85,
-                                   times = 1,
-                                   list = F)
+library(tidyverse)
+library(reactable)
+library(reshape2)
+library(glue)
+library(dplyr)
+library(caret)
+library(lubridate)
 
-
-time_function <- function(dataset){
-dataset$winning_time_sec<- as.numeric(gsub(":","",str_extract(dataset$winning_time,":\\d+.\\d+")))
-
-dataset$winning_time_min <- as.numeric(str_extract(dataset$winning_time,"\\d+"))*60
-dataset$winning_time_total <- dataset$winning_time_min+dataset$winning_time_sec
-dataset$Margin <- gsub("L","",dataset$Margin) 
-dataset$Margin_Metres <- as.numeric(dataset$Margin)*2.5
-dataset$winner_MperSec <- dataset$distance/dataset$winning_time_total
-
-dataset$time <- dataset$winning_time_total+
-  ifelse(is.na(dataset$Margin_Metres/dataset$winner_MperSec),
-         0,
-         dataset$Margin_Metres/dataset$winner_MperSec)
-return(dataset)
-}
-
-race_results_combined_time <- time_function(race_results_combined)
-trial_results_combined_time <- time_function(trial_results_combined)
-
-race_results_combined_train <- race_results_combined_time[train_index,] 
-race_results_combined_test <- race_results_combined_time[-train_index,]
+df_sec <- list.files(pattern = ".rds") %>%
+  map(readRDS)
 
 
-training_ds <- rbind(race_results_combined_train, trial_results_combined_time)
+df1_sec <- df_sec %>%
+  bind_rows %>%
+  unique()
 
 
-glm1 <- glm(data = training_ds, formula = time ~ distance + track_condition + Racecourse + Weight)
 
-
-race_results_combined_test$time_pred <- predict(glm1, race_results_combined_test)
-
-
-ggplot(race_results_combined_test)+
-  geom_point(aes(x = time, y = time_pred, colour = as.factor(distance)))+
-  geom_abline()
-
-training_ds$win_indicator <- ifelse(training_ds$Finish == 1,1,0)
-race_results_combined_test$win_indicator <- ifelse(race_results_combined_test$Finish==1,1,0)
-
-glm_binom <- glm(data = training_ds, formula = win_indicator ~ distance+track_condition+Weight+Day_of_week+Date_format+Racecourse, family = "binomial")
-
-race_results_combined_test$win_pred <- predict(glm_binom, race_results_combined_test, "response")
-
-full_ds <- rbind(trial_results_combined_time, race_results_combined_time)
-
-
-nested_training_ds <- full_ds %>%
-  mutate(ID = paste(info,",",Race)) %>%
-  select(Finish,
-         Horse,
-         Trainer,
-         Jockey,
-         Bar.,
-         Weight,
-         odds,
-         Racecourse,
-         Race,
-         distance,
-         Day_of_week,
-         track_condition,
-         time,
-         ID) %>%
-  group_by(ID)
-
-library(rsample)
+library(rvest)
+library(lubridate)
+library(glue)
 library(furrr)
 
+future::plan(multisession, workers = 4)
+
+base_url <- 'https://www.racingzone.com.au/results/'
 
 
-# Sampling function that creates a Monte-Carlo CV set
-# and returns the analysis portion.
-mc_sample <- function(data, times, prop) {
-  data %>% 
-    mc_cv(times = times, prop = prop) %>% 
-    mutate(analysis = map(splits, ~analysis(.x))) %>%
-    select(-c(id, splits))
+#getting required urls
+#base_url <- "https://www.racingaustralia.horse/FreeFields/Calendar_Results.aspx"
+
+date_list <- c(as.character(seq.Date(max(df1_sec$Date_format)+1,Sys.Date(), by = 1)))
+
+#date_list <- c(as.character(seq.Date(as.Date('2022-10-21'),as.Date('2022-11-21'), by = 1)))
+#creating blank list so i can get a url for race results for each state
+date_list_url <- c()
+
+#generating urls for each states racing results over the last month
+for (i in 1:length(date_list)) {
+  date_list_url[[i]] <- paste0(base_url,date_list[i],"/")
 }
 
-# Set up out workers
-plan(multisession, workers = availableCores() - 1)
-
-# Parallel sampling
-number_samples <- 1000 
-hr_mccv <- future_map(
-  1:number_samples,
-  ~{ mc_sample(nested_training_ds, times = 1, prop = .1) },
-  .options = furrr_options(seed = TRUE)
-)
-
-# Switch plans to close workers and release memory
-plan(sequential)
-
-# Bind samples together and unnest
-hr_mccv <- hr_mccv %>% 
-  bind_rows() %>% 
-  mutate(sample_id = 1:n()) %>% 
-  unnest(cols = analysis) %>% 
-  unnest(cols = data)
-
-
-
-#function to apply a bet and calculate returns
-bet_returns <- function(data, bet = 1) {
-  data %>% 
-    mutate(
-      bet_return = if_else(
-        Finish == 1,
-        (bet * odds) - bet,
-        -bet
-      )
-    ) %>% 
-    group_by(ID) %>% 
-    mutate(
-      sample_race_index = 1:n(),
-      cumulative_return = cumsum(bet_return),
-      cumulative_rpr = cumulative_return / sample_race_index 
-    ) %>% 
-    ungroup()
+#generating a list of urls to run through to get all race data for last month
+results <- function(url_list){
+  paste0('https://www.racingzone.com.au/',
+         read_html(url_list) %>%
+           html_nodes("div.race-loader")%>%
+           html_nodes("a") %>%     
+           # find all links in the page
+           html_attr("href") %>%
+           unique() #%>%
+           #str_subset("/results/.+/\\d+-[:alpha:]+.")
+  )
 }
 
+#getting list of all urls with race data and converting to one list
+sec_results_url <- future_map(date_list_url, results,.progress = T) 
 
-hr_favourite <- hr_mccv %>% 
-  drop_na(odds) %>% 
-  group_by(sample_id, ID) %>% 
-  mutate(odds.rank = order(odds)) %>% 
-  slice_min(odds.rank, with_ties = FALSE, n = 1) %>% 
-  ungroup()
+sec_results_urls <- sec_results_url %>%
+  purrr::flatten()
 
-# Place out bets
-hr_favourite <- bet_returns(full_ds, bet = 100)
+sec_results_urls <- sec_results_urls[!sec_results_urls %in% c("https://www.racingzone.com.au/results/","https://www.racingzone.com.au" )]
 
+Date_table <- c()
 
-
-fav_horse <- training_ds %>%
-  mutate(ID = paste(info,",",Race)) %>%
-  select(Finish,
-         Horse,
-         Trainer,
-         Jockey,
-         Bar.,
-         Weight,
-         odds,
-         Date_format,
-         Racecourse,
-         Race,
-         distance,
-         Day_of_week,
-         track_condition,
-         time,
-         ID) %>%
-  group_by(ID, Date_format)
-
-
-betting_function <- function(data, bet = 100, groupby = ID){
-  data <- data %>%
-    group_by(Date_format, Racecourse) %>%
-    mutate(bet = ifelse(odds == min(odds),bet,NA),
-           return = ifelse(Finish ==1,(bet*odds)-bet,-bet)) %>%
-    ungroup() %>%
-    mutate(rolling_return = cumsum(coalesce(return,0)))
-    
-  return(data)
-}
-
-
-
-
-fav_bet <- betting_function(fav_horse, bet = 100)
-
-ggplot(fav_bet)+
-  geom_line(aes(x=Date_format, y = rolling_return))
-
-#######
-
-#creating a betting df with required odds to win $100 from a single race
-odds <- round(rep(seq(1.01,301,0.01),2),2)
-winner <- rep(0:1,length(odds)/2)
-bet_df <- data.frame(odds) %>%
-  arrange(odds) %>%
-  #cbind(winner) %>%
-  mutate(bet_amount = round(-200/(1-odds),2),
-         winnings = (odds*bet_amount)-bet_amount) %>%
-  distinct()
-
-all_race_data_clean <- as.data.frame(all_race_data_clean)%>%
-  mutate(winner = as.integer(ifelse(Finish==1,1,0))) 
-t1 <- left_join(all_race_data_clean, 
-                bet_df, by= c("odds"))
-
-#applying a bet to the favourite on each day until i get a winner then stopping
-t2 <- t1 %>% 
-  group_by(Date_format, RaceID) %>%
-  arrange(Date_format, RaceID,odds) %>%
-  mutate(outcome = ifelse(Finish ==1,winnings,-bet_amount)) %>%
-  filter(odds ==min(odds),
-         is.na(odds)!=T,
-         track_condition != "Track Condition: Heavy 8 T",
-         track_condition != "Track Condition: Heavy 9 T",
-         track_condition != "Track Condition: Heavy 10 T",
-         Day_of_week != "Sat") %>%
-  ungroup() %>%
-  mutate(init_bet_indicator = ifelse(lag(Date_format)!= Date_format,1,0),
-         init_bet_indicator = ifelse(is.na(init_bet_indicator),1,init_bet_indicator),
-         init_bet_outcome = init_bet_indicator*outcome) %>%
-  group_by(Date_format) %>%
-  mutate(daily_outcome = cumsum(init_bet_outcome)) %>%
-  group_by(Date_format, RaceID) 
-
-for (i in 1:nrow(t2)){
-  if(i==1){
-    t2$new_bet[i] <- 100
-  } else if (t2$Date_format[i-1]== t2$Date_format[i]) {
-  t2$new_bet[i] <- ifelse(t2$winner[i-1]>0|t2$new_bet[i-1]==0,0,((-100-t2$new_bet[i-1])/(1-t2$odds[i])))
-  } else {
-    t2$new_bet[i] <- t2$bet_amount[i]
+for (i in 1:length(sec_results_url)){
+  for (n in 1:length(sec_results_url[[i]])){
+    Date_table[[i]] <- list(rep(date_list[i], each = n))
   }
-  t2$new_bet_lag <- lag(t2$new_bet,1)
 }
+
+Date_tables <- Date_table %>%
+  purrr::flatten() %>%
+  purrr::flatten() 
+
+#creating function to extract all tables from each url 
+read_html_tbls <- function(url) {
+  html <- read_html(url) %>% 
+    html_nodes("table") %>% 
+    html_table()
   
-
-for (i in 1:nrow(t2)){
-  if(i==1){
-    t2$new_bet[i] <- t2$bet_amount[i]
-  } else if (t2$Date_format[i-1]== t2$Date_format[i]) {
-    t2$new_bet[i] <- ifelse(t2$winner[i-1]>0|t2$new_bet[i-1]==0,0,((-200-t2$new_bet[i-1]-t2$new_bet_lag[i-1])/(1-t2$odds[i])))
-  } else {
-    t2$new_bet[i] <- t2$bet_amount[i]
-  }
-  t2$new_bet_lag <- lag(t2$new_bet,1)
-  t2$win_loss <- ifelse(t2$winner==1,(t2$new_bet*t2$odds)-t2$new_bet,-t2$new_bet)
-  t2$cum_sum <- cumsum(t2$win_loss)
+  
+  #close(url)
+  return(html)
 }
 
-ggplot(data = t2) +
-  geom_point(aes(x=Date_format, y=cum_sum))
 
-#######
+#creating blank list for race tables to be appended to
+race_secs <- c()
 
-#Neural Network
-library(caret)
+#appending all race tables
+race_secs <- future_map(sec_results_urls,read_html_tbls,.progress = T)
 
-v1 <- race_results_combined_train %>% 
-  filter(time >0) %>%
-  mutate(winner = ifelse(Finish==1,1,0))
-v2 <- race_results_combined_test %>%
-  filter(time >0) %>%
-  mutate(winner = ifelse(Finish==1,1,0))
+race_sectionals <- c() 
 
-nn <- train(winner ~ Bar. + Weight + odds + Race + Day_of_week + distance + track_condition, data=v1, method = "nnet", linout=TRUE, trace = FALSE, type = "prob")
+for (i in 1:length(race_secs)){
+  race_sectionals[[i]] <- as.data.frame(race_secs[[i]][1])
+  if (ncol(as.data.frame(race_secs[[i]][1]))==6){
+    race_sectionals[[i]] <- cbind(as.data.frame(race_secs[[i]][1]),
+                                  data.frame(matrix(nrow = nrow(as.data.frame(race_secs[[i]][1])), ncol = 6)))
+  }
+  colnames(race_sectionals[[i]]) <- c("Finish",
+                                      "Margin",
+                                      "Colours",
+                                      "Name",
+                                      "SP",
+                                      "Bar",
+                                      "Weight",
+                                      "Settle_pos",
+                                      "pos_1200m",
+                                      "pos_800m",
+                                      "pos_400m",
+                                      "Stewards_Comments")
+}
 
-v2$pred <- predict(nn, v2)
+#generating list of dates for each row in race sectionals
+Dates <- c()
 
-v2_test <- v2 %>%
-  filter(pred>0.65) %>%
-  arrange(Date_format)%>%
-  mutate(bet_result = ifelse(Finish ==1, (1000*odds)-1000,-1000),
-         total = cumsum(bet_result))
+for (i in 1:length(race_sectionals)){
+  Dates[[i]] <- data.frame(c(rep(Date_tables[[i]], nrow(race_sectionals[[i]]))))
+}
+
+c1 <- do.call(rbind,race_sectionals)
+c2 <- do.call(rbind, Dates) 
+names(c2) <- "Date"
+
+c3 <- cbind(c1,c2)
+
+c4 <- c3 %>%
+  filter(!is.na(pos_400m)) %>%
+  mutate(trainer = str_split(Name,"-") %>% map_chr(., 2),
+         Horses= str_split(Name,"\\d[:alpha:]") %>% map_chr(.,1),
+         Horse= str_to_upper(gsub(" ","",Horses)),
+         Horse = gsub("\n","",Horse),
+         Horse = gsub("'","",Horse),
+         Horse = gsub("\\d+","",Horse),
+         Date_format = as.Date(Date),
+         Settle_pos = gsub("-",NA,Settle_pos)) %>%
+  select(Horse, Date_format, Bar, Settle_pos, pos_1200m, pos_800m, pos_400m)
+
+saveRDS(c4, glue("C:/Users/owenl/Documents/Owen/R_git/Horse_racing_analysis/sectional_positions/sectional_positions_from_",min(date_list),"_to_", max(date_list),'.rds'))

@@ -1,0 +1,269 @@
+---
+title: "HorseRacing Prediction"
+author: "Owen Looney"
+date: "04/07/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r intro}
+setwd("C:/Users/owenl/Documents/Owen/R_git/Horse_racing_analysis")
+
+library(tidyverse)
+library(reactable)
+library(reshape2)
+library(glue)
+library(dplyr)
+
+df <- list.files(pattern = ".rds") %>%
+  map(readRDS)
+
+
+df1 <- df %>%
+  bind_rows %>%
+  unique()
+
+
+
+# creating time function to approximate a finish time for all horses, not just winning horses
+time_function <- function(dataset){
+  dataset$winning_time_sec<- as.numeric(gsub(":","",str_extract(dataset$winning_time,":\\d+.\\d+")))
+  
+  dataset$winning_time_min <- as.numeric(str_extract(dataset$winning_time,"\\d+"))*60
+  dataset$winning_time_total <- dataset$winning_time_min+dataset$winning_time_sec
+  dataset$Margin <- gsub("L","",dataset$Margin) 
+  ## using the assumption that a horse length is roughly 2.5 metres
+  dataset$Margin_Metres <- as.numeric(dataset$Margin)*2.5
+  dataset$winner_MperSec <- dataset$distance/dataset$winning_time_total
+  
+  dataset$time <- dataset$winning_time_total+
+    ifelse(is.na(dataset$Margin_Metres/dataset$winner_MperSec),
+           0,
+           dataset$Margin_Metres/dataset$winner_MperSec)
+  return(dataset)
+}
+
+df2 <- time_function(df1)
+```
+
+
+
+
+```{r data cleaning}
+df3 <- df2 %>%
+  dplyr::select(-winning_time,
+         -winning_time_sec,
+         -winning_time_min,
+         -winning_time_total,
+         -winner_MperSec) %>%
+  mutate(RaceID = paste(info,",",Race),
+         ID = paste(info,",",Race,"Finish-", Finish),
+         Margin_Metres = ifelse(is.na(Margin_Metres)==T, 0, Margin_Metres),
+         winner = ifelse(Finish==1,1,0),
+         track_condition = gsub('.{2}$','',track_condition),
+         Weight = ifelse(is.na(Weight),0,Weight),
+         Race_time = str_extract(race_info,"\\d+:\\d+[AP]M"),
+         Datetime = as.POSIXct(paste(Date_format, " ", Race_time), format = "%Y-%m-%d %I:%M%p")) %>%
+  filter(time >0,
+         is.na(Finish)!=T,
+         track_condition!="character(",
+         is.na(distance)==F) %>%
+  arrange(Datetime,RaceID, Finish) %>%
+  group_by(RaceID) %>%
+  mutate(favourite = ifelse(odds == min(odds),1,0),
+         fav_winner = ifelse(favourite ==1 & winner ==1,1,0)) %>%
+  ungroup() %>%
+  data.frame() %>%
+  distinct(ID, .keep_all = T)
+
+
+df4 <- df3 %>%
+  filter(!is.na(odds)) %>%
+  mutate(win_prize = as.numeric(gsub(" 2nd ","",
+                                      gsub(",","",str_split(character, "\\$") %>% map_chr(., 3)))),
+         prize_pool = as.numeric(gsub(".1st ","",
+                                      gsub(",","",str_split(character, "\\$") %>% map_chr(., 2)))))
+
+
+
+
+df3 <- df2 %>%
+  dplyr::select(-winning_time,
+         -winning_time_sec,
+         -winning_time_min,
+         -winning_time_total,
+         -winner_MperSec) %>%
+  mutate(RaceID = paste(info,",",Race),
+         ID = paste(info,",",Race,"Finish-", Finish),
+         Margin_Metres = ifelse(is.na(Margin_Metres)==T, 0, Margin_Metres),
+         winner = ifelse(Finish==1,1,0),
+         track_condition = gsub('.{2}$','',track_condition),
+         Weight = ifelse(is.na(Weight),0,Weight),
+         Race_time = str_extract(race_info,"\\d+:\\d+[AP]M"),
+         Datetime = as.POSIXct(paste(Date_format, " ", Race_time), format = "%Y-%m-%d %I:%M%p")) %>%
+  filter(time >0,
+         is.na(Finish)!=T,
+         track_condition!="character(",
+         is.na(distance)==F) %>%
+  arrange(Datetime,RaceID, Finish) %>%
+  mutate(Bar = Bar.,
+         Horse = gsub(" {1+}","",Horse),
+         Horse = gsub("[^[:alpha:] ]", "", Horse),
+         Jockey = gsub(" {1+}","",Jockey),
+         Jockey = gsub("[^[:alpha:] ]", "", Jockey),
+         Jockey = gsub("*\\(.{1+}\\)", "", Jockey),
+         Jockey = gsub("kg$","",Jockey),
+         Trainer = gsub(" {1+}","",Trainer),
+         Trainer = gsub("[^[:alpha:] ]", "", Trainer),
+         track_condition = gsub(" {1+}","",track_condition),
+         track_condition = gsub("\\_{1+}","",track_condition),
+         trackcondition = gsub(":{1+}","",track_condition)) %>%
+  filter(!is.na(odds))
+```
+
+```{r test train}
+test_model_race <- c(df3$Date_format[[nrow(df3)]])
+
+test_model <- df3 %>% filter(Date_format %in% test_model_race) %>%
+  dplyr::select(RaceID,
+         Horse,
+         Jockey,
+         Trainer,
+         Finish, 
+         Bar,
+         Weight,
+         distance,
+         trackcondition,
+         time)
+
+train_model <- df3 %>% 
+  filter(!Date_format %in% test_model_race,
+         Horse %in% test_model$Horse,
+         Jockey %in% test_model$Jockey,
+         Trainer %in% test_model$Trainer,
+         trackcondition %in% test_model$trackcondition,
+         Weight>0) %>%
+  dplyr::select(RaceID,
+         Horse,
+         Jockey,
+         Trainer,
+         Finish, 
+         Bar,
+         Weight,
+         distance,
+         trackcondition,
+         time)
+
+test_model <- test_model %>%
+  filter(Horse %in% train_model$Horse,
+         Jockey %in% train_model$Jockey,
+         Trainer %in% train_model$Trainer,
+         trackcondition %in% train_model$trackcondition)
+##
+train_model <- train_model %>% 
+  filter(Horse %in% test_model$Horse,
+         Jockey %in% test_model$Jockey,
+         Trainer %in% test_model$Trainer,
+         trackcondition %in% test_model$trackcondition)
+
+```
+
+
+```{r nnet}
+library(caret)
+
+nn_train_dummy_vars <- dummyVars(" ~ .", data = train_model %>%
+                                   dplyr::select(Horse, Trainer, Jockey, trackcondition))
+nn_train_dummy_df <- data.frame(predict(nn_train_dummy_vars, newdata = train_model))
+
+nn_train_df <- cbind(train_model %>% 
+                       dplyr:: select(Bar,
+                                      Weight,
+                                      distance,
+                                      time), nn_train_dummy_df)
+  
+nn_test_dummy_vars <- dummyVars(" ~ .", data = test_model %>%
+                                  dplyr::select(Horse, Trainer, Jockey, trackcondition))
+nn_test_dummy_df <- data.frame(predict(nn_test_dummy_vars, newdata = test_model))
+
+
+nn_test_df <- cbind(test_model %>%
+                       dplyr:: select(Bar,
+                                      Weight,
+                                      distance,
+                                      time), nn_test_dummy_df)
+
+nn_train_clean_names <- names(nn_test_df)
+nn_train_clean <- nn_train_df[,nn_train_clean_names] 
+
+library(doParallel)
+
+registerDoParallel(cores = 4)
+
+#numFolds <- trainControl(method = 'cv', number = 10, classProbs = TRUE, verboseIter = TRUE, summaryFunction = twoClassSummary, preProcOptions = list(thresh = 0.75, ICAcomp = 3, k = 5))
+fit2 <- train(time ~ . -time, data = nn_train_clean, method = 'nnet', response = "prob")
+
+preds <- predict(fit2, nn_test_df) %>% data.frame()
+
+library(neuralnet)
+fit1 <- neuralnet::neuralnet(time ~ ., data = nn_train_clean, hidden = 5, linear.output = T)
+
+
+preds <- predict(fit1, nn_test_df)
+
+library(reticulate)
+
+```
+
+
+```{python}
+# first neural network with keras tutorial
+import numpy as np
+from numpy import loadtxt
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense
+
+df_1 = r.nn_train_df
+df_2 = r.nn_test_df
+
+x = df_1.iloc[:,np.r_[0:3,4:408]]
+y = df_1.iloc[:,3]
+
+
+
+# define the keras model
+# define model
+model = Sequential()
+model.add(Dense(25, input_dim=407, activation='relu', kernel_initializer='he_uniform'))
+model.add(Dense(1, activation='linear'))
+
+...
+# compile the keras model
+model.compile(loss='mean_squared_error', optimizer='adam', metrics=['accuracy'])
+
+# fit the keras model on the dataset
+history = model.fit(x, y, validation_data=(x, y), epochs=100, verbose=0)
+
+
+# evaluate the keras model
+_, accuracy = model.evaluate(x, y)
+print('Accuracy: %.2f' % (accuracy*100))
+
+```
+
+
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
